@@ -1,0 +1,23 @@
+{
+  "appId": "com.wangcangxing.fixpoint",
+  "productName": "Fixpoint",
+  "copyright": "Powered by wangcangxing",
+  "electronVersion": "44.7.2",
+  "directories": {
+    "output": "build/installer"
+  },
+  "win": {
+    "icon": "assets/fixpoint.ico",
+    "target": ["nsis"]
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "Fixpoint",
+    "artifactName": "Fixpoint-Setup-${version}.${ext}",
+    "uninstallDisplayName": "Fixpoint (8051 单片机 AI 开发环境)"
+  }
+}

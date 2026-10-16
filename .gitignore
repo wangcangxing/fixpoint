@@ -1,0 +1,27 @@
+# 依赖与构建产物（都可再生）
+node_modules/
+build/
+*.log
+
+# 本机配置（可能含 API Key，绝不入库）
+keil-ide/settings.json
+
+# 测试截图（脚本保留，图不入库）
+keil-ide/verify/*.png
+
+# DSH 侧插件与第三方快照（本次不发布）
+vendor/
+mcp-server-keil/
+dsh-plugin-keil/
+keil-build.ps1
+
+# 编辑器/系统杂物
+.DS_Store
+Thumbs.db
+# demo 工程构建与备份产物
+demo/.backups/
+demo/Objects/
+demo/Listings/
+demo/*.uvgui.*
+# 任何位置的备份目录（含测试时产生的）
+.backups/

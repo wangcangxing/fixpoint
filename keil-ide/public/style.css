@@ -1,0 +1,338 @@
+/* 8051 Studio v0.1 — one window: toolbar + files | editor | AI + problems. */
+:root {
+  --bg: #1b1d21;
+  --panel: #22252b;
+  /* Structural borders are black on purpose: every panel, title separator, input,
+     button, chip and modal edge uses this one token. */
+  --line: #000000;
+  --fg: #e6e8ec;
+  --dim: #9aa0aa;
+  --accent: #4c8dff;
+  --err: #ff6b6b;
+  --warn: #f0c674;
+  --ok: #55c57a;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+}
+body { display: flex; flex-direction: column; height: 100vh; }
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  row-gap: 4px;
+  /* Readability first: wrap when the chips do not fit. (A nowrap version looked
+     tidy but truncated every chip AND the author credit.) */
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+/* Buttons are never squeezed: the chips and the spacer give way first. */
+.toolbar > button { flex: 0 0 auto; }
+.brand { font-weight: 600; margin-right: 2px; flex: 0 0 auto; }
+.brand b { color: var(--accent); }
+/* Author credit: never truncated (it is the one thing that must always read). */
+.credit {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--dim);
+  opacity: 0.9;
+}
+.spacer { flex: 1 1 0; min-width: 0; }
+/* Chips shrink and truncate rather than widening the toolbar. */
+.toolbar .chip { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; max-width: 38vw; }
+#project { flex: 1 1 220px; min-width: 110px; }
+
+button {
+  background: #2c3038;
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.primary { background: #2a4a86; border-color: #3a63b0; }
+/* Compact buttons for pane titles (新建 / 打开 in the file pane). */
+button.tiny { padding: 1px 7px; font-size: 11px; }
+select, textarea, input[type="text"] {
+  background: #1b1d21;
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font: inherit;
+}
+#project { max-width: 460px; }kbd {
+  font: 11px monospace;
+  background: #16181c;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+.chip {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-size: 12px;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.chip.ok { color: var(--ok); border-color: #2f5c3f; }
+.chip.bad { color: var(--err); border-color: #6b2f2f; }
+.dim { color: var(--dim); }
+
+main { flex: 1 1 auto; display: flex; min-height: 0; min-width: 0; overflow: hidden; }
+.pane { background: var(--panel); border: 1px solid var(--line); min-height: 0; min-width: 0; }
+.pane-title {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--dim);
+  font-size: 12px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  /* Never break a title across lines; truncate instead. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pane-title > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.pane-title > .spacer { flex: 1 1 auto; }
+.pane-title > button { flex: 0 0 auto; }
+/* Side panes scale with the window (clamp) instead of being pinned to fixed px. */
+.files { flex: 0 1 clamp(150px, 17vw, 230px); border-right: none; display: flex; flex-direction: column; }
+.files ul, .problems ul { list-style: none; margin: 0; padding: 4px; overflow: auto; flex: 1 1 auto; }
+.files ul.children { padding: 0; overflow: visible; }
+.files .node-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.files li.kind-file > .node-row,
+.files li.kind-header > .node-row,
+.files li.kind-orphan > .node-row { cursor: pointer; }
+.files .node-row:hover { background: #2a2e36; }
+.files li.active > .node-row { background: #2a4a86; }
+.files .twisty {
+  flex: 0 0 12px;
+  width: 12px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--dim);
+  cursor: pointer;
+}
+.files .node-label { overflow: hidden; text-overflow: ellipsis; }
+.files li.kind-project > .node-row > .node-label,
+.files li.kind-target > .node-row > .node-label { color: #cfe0ff; font-weight: 600; }
+.files li.kind-header > .node-row > .node-label { color: #9fb6d9; font-style: italic; }
+.files .node-label.unresolved { color: var(--warn); text-decoration: underline dotted; }
+.files .node-label.missing { color: var(--err); text-decoration: line-through; }
+.files .tag {
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 11px;
+  color: var(--warn);
+  border: 1px solid #6b5a2f;
+  border-radius: 8px;
+}
+.note { padding: 6px 8px; font-size: 12px; color: var(--warn); border-bottom: 1px solid var(--line); }
+
+/* Multi-project workspace bar (`.uvmpw`): picker + member list above the tree. */
+.workspace-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--line);
+}
+.workspace-bar select { flex: 1 1 auto; min-width: 0; font-size: 12px; padding: 2px 4px; }
+.workspace-bar button { flex: 0 0 auto; }
+.workspace-list { border-bottom: 1px solid var(--line); max-height: 150px; overflow: auto; padding: 4px; }
+.workspace-list .row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.workspace-list .row:hover { background: #2a2e36; }
+.workspace-list .row.current { background: #2a4a86; }
+.workspace-list .row .name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.workspace-list .row .bad { color: var(--warn); }
+.hidden { display: none; }
+
+.editor { flex: 1 1 auto; border-left: none; border-right: none; min-width: 0; }
+#editor { width: 100%; height: 100%; }
+
+.chat { flex: 0 1 clamp(230px, 25vw, 360px); display: flex; flex-direction: column; min-width: 0; }
+#transcript { flex: 1 1 auto; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.msg { border: 1px solid var(--line); border-radius: 5px; padding: 6px 8px; white-space: pre-wrap; word-break: break-word; }
+.msg.user { border-color: #3a63b0; background: #20293a; }
+.msg.ai { background: #1d2026; }
+.msg.err { border-color: #6b2f2f; color: var(--err); }
+.msg .meta { color: var(--dim); font-size: 11px; margin-bottom: 4px; }
+
+/* Markdown inside an AI bubble (the raw ## / ** / ``` markers must never show). */
+.msg .md { white-space: normal; }
+.msg .md > *:first-child { margin-top: 0; }
+.msg .md > *:last-child { margin-bottom: 0; }
+.msg .md h3, .msg .md h4, .msg .md h5, .msg .md h6 { margin: 10px 0 4px; font-size: 13px; color: #cfe0ff; }
+.msg .md p { margin: 4px 0; }
+.msg .md ul, .msg .md ol { margin: 4px 0; padding-left: 20px; }
+.msg .md li { margin: 2px 0; }
+.msg .md pre {
+  margin: 6px 0;
+  padding: 6px 8px;
+  background: #16181c;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: auto;
+  max-height: 320px;
+  /* The font belongs on `pre`, not only on `pre code`: after Monaco colourises a
+     block its children are coloured <span>s, and a proportional font there would
+     ruin the code alignment. */
+  font: 12px/1.5 Consolas, "Courier New", monospace;
+}
+.msg .md pre code, .msg .md pre span, .msg .md pre div { font: inherit; white-space: pre; }
+.msg .md code {
+  font: 12px/1.5 Consolas, "Courier New", monospace;
+  background: #16181c;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+.msg .md blockquote { margin: 6px 0; padding: 2px 8px; border-left: 3px solid var(--accent); color: var(--dim); }
+.msg .md a { color: var(--accent); }
+.msg .md strong { color: #fff; }
+/* "the provider cut the answer" notice inside an AI bubble */
+.msg .md-note {
+  margin-top: 6px;
+  padding: 4px 6px;
+  border-left: 3px solid var(--warn);
+  color: var(--warn);
+  font-size: 12px;
+}
+.chat textarea { margin: 0 8px; width: calc(100% - 16px); resize: vertical; }
+.chat .row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-size: 12px; flex-wrap: wrap; }
+.chat .row label { white-space: nowrap; }
+.chat .row button { flex: 0 0 auto; white-space: nowrap; }
+.chat .row select { flex: 1 1 120px; min-width: 0; }
+/* The skill description next to the picker truncates instead of wrapping the row. */
+#skill-hint { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat #btn-apply { margin: 0 8px 8px; }
+
+.problems { flex: 0 1 clamp(80px, 15vh, 170px); min-height: 44px; border-top: none; display: flex; flex-direction: column; }
+.problems li { padding: 2px 6px; cursor: pointer; display: flex; gap: 8px; }
+.problems li:hover { background: #2a2e36; }
+.problems li.error { color: var(--err); }
+.problems li.warning { color: var(--warn); }
+.problems .loc { color: var(--dim); }
+
+/* AI settings modal */
+.modal {
+  position: fixed;
+  inset: 0;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+.modal.hidden { display: none; }
+.modal-box {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  width: min(620px, 96vw);
+  /* A flex column with its own scrolling area: the footer buttons stay visible
+     even when the window is short (before, the whole box scrolled). */
+  max-height: 94vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.modal-box h3 { margin: 0 0 10px; font-size: 15px; }
+.field { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.field > span { flex: 0 0 92px; color: var(--dim); font-size: 12px; }
+.field input, .field select { flex: 1 1 auto; min-width: 0; }
+.hint { color: var(--dim); font-size: 12px; line-height: 1.6; margin: 10px 0; }
+.hint code {
+  background: #16181c;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 4px;
+  font: 11px monospace;
+}
+.modal-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.status {
+  margin: 10px 0 0;
+  padding: 8px;
+  background: #16181c;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: 12px/1.6 monospace;
+  white-space: pre-wrap;
+  color: var(--dim);
+  max-height: 180px;
+  overflow: auto;
+}
+
+/* ---- settings dialog: tab list + panes ---- */
+.modal-box.wide { width: min(940px, 96vw); }
+.settings-head { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+.settings-head h3 { margin: 0; }
+.settings-body { display: flex; gap: 14px; margin-top: 10px; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.settings-tabs { display: flex; flex-direction: column; gap: 4px; flex: 0 0 clamp(96px, 13vw, 132px); overflow: auto; }
+.settings-tabs .tab {
+  padding: 7px 10px;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+}
+.settings-tabs .tab:hover { background: #22252b; color: var(--fg); }
+.settings-tabs .tab.active { background: #2a4a86; border-color: #3a5c9c; color: #fff; }
+.settings-panes { flex: 1 1 auto; min-width: 0; min-height: 0; overflow: auto; }
+.settings-panes .pane-tab { display: none; }
+.settings-panes .pane-tab.active { display: block; }
+.field textarea { width: 100%; resize: vertical; font: 12px/1.5 monospace; }
+#skills-roots, #about-doctor { max-height: 140px; margin: 0; }
+.modal-box > .modal-row { flex: 0 0 auto; }
+
+/* Narrow windows: the tab list moves above the panes and scrolls sideways. */
+@media (max-width: 820px) {
+  .settings-body { flex-direction: column; gap: 8px; }
+  .settings-tabs { flex: 0 0 auto; flex-direction: row; overflow-x: auto; overflow-y: hidden; }
+  .settings-tabs .tab { white-space: nowrap; }
+  .field > span { flex: 0 0 76px; }
+  .modal-box.wide { width: 96vw; }
+}
+
+/* Short windows: keep the dialog usable instead of overflowing. */
+@media (max-height: 600px) {
+  .modal-box { max-height: 96vh; padding: 10px 12px; }
+  .settings-body { min-height: 180px; }
+  #skills-roots, #about-doctor { max-height: 96px; }
+}
