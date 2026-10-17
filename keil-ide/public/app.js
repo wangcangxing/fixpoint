@@ -304,7 +304,10 @@ function renderMarkdown(text) {
       index += 1
       const pre = document.createElement('pre')
       const code = document.createElement('code')
-      code.textContent = body.join('\n')
+      // Render what would actually be written: drop a FILE: marker that the model
+      // put inside the fence (it is a target, not code).
+      const shown = /^(c|c51|cpp|h|hpp|inc|s|a51)$/i.test(language) ? splitFileMarker(body.join('\n')).code : body.join('\n')
+      code.textContent = shown
       pre.appendChild(code)
       fragment.appendChild(pre)
       // Colour it with the editor's own tokenizer when available (best effort).
@@ -774,6 +777,24 @@ async function send() {
   }
 }
 
+/**
+ * Models often put the `FILE:` marker INSIDE the fence despite the prompt
+ * (measured: it then becomes line 1 of the file and the compiler reports
+ * `main.c(1): error C129: missing ';' before ':'`). Treat it as a target marker,
+ * never as code, wherever it appears.
+ */
+function splitFileMarker(code) {
+  const text = String(code ?? '')
+  const leadingMatch = /^(?:[ \t]*\r?\n)*/.exec(text)
+  const leading = leadingMatch ? leadingMatch[0] : ''
+  const rest = text.slice(leading.length)
+  const firstLine = rest.split('\n')[0]
+  const match = /^[ \t]*(?:(?:\/\/|\/\*)[ \t]*)?FILE:[ \t]*(.+?)\s*$/.exec(firstLine)
+  if (!match) return { code: text, file: '' }
+  const file = match[1].replace(/\s*\*\/\s*$/, '').trim()
+  return { code: rest.slice(firstLine.length).replace(/^\r?\n/, ''), file }
+}
+
 /** Pull the first fenced code block (and an optional `FILE:` line) out of a reply. */
 function extractCodeBlock(text) {
   if (!text) return null
@@ -781,7 +802,9 @@ function extractCodeBlock(text) {
   if (!match) return null
   const before = text.slice(0, match.index)
   const fileMatch = /FILE:\s*(.+)\s*$/m.exec(before)
-  return { code: match[1], file: fileMatch ? fileMatch[1].trim() : '' }
+  const parsed = splitFileMarker(match[1])
+  const file = (fileMatch ? fileMatch[1].trim() : '') || parsed.file
+  return { code: parsed.code, file }
 }
 
 async function applyReply() {

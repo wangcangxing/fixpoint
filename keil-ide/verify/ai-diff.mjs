@@ -218,6 +218,38 @@ check(
 check('open file was not switched', await evaluate(`state.current.name`), 'mock-suggestion.c')
 await evaluate(`closeDiff(); true`)
 
+// The marker inside the fence (what actually happened once): it must not become code.
+const insideReply = '```c\nFILE: mock-suggestion.c\n#include <reg51.h>\n\nvoid main(void)\n{\n    P1 = 0x00;\n}\n```'
+const parsedInside = await evaluate(`extractCodeBlock(${JSON.stringify(insideReply)})`)
+check('FILE inside the fence is treated as the target', /mock-suggestion\.c$/.test(parsedInside.file), true)
+check('FILE inside the fence is stripped from the code', /^#include/.test(parsedInside.code), true)
+const renderedInside = await evaluate(`(() => renderMarkdown(${JSON.stringify(insideReply)}).textContent)()`)
+check('chat rendering drops the FILE marker too', /FILE:/.test(renderedInside), false)
+const parsedSlash = await evaluate(
+  `extractCodeBlock(${JSON.stringify('```c\n// FILE: mock-suggestion.c\n#include <reg51.h>\n```')})`,
+)
+check(
+  'commented FILE inside the fence also works',
+  /^#include/.test(parsedSlash.code) && /mock-suggestion\.c$/.test(parsedSlash.file),
+  true,
+)
+
+await evaluate(`(() => { state.lastReply = ${JSON.stringify(insideReply)}; return previewOrApply() })()`)
+check(
+  'diff opens for the inside-the-fence marker',
+  await until(
+    `!document.getElementById('diff-view').classList.contains('hidden') && /mock-suggestion\\.c/.test(document.getElementById('diff-title').textContent)`,
+  ),
+  true,
+)
+const diffText = await evaluate(`state.diffModified`)
+check('diff text has no FILE marker', /FILE:/.test(diffText), false)
+await evaluate(`document.getElementById('btn-diff-apply').click(); true`)
+await until(`document.getElementById('diff-view').classList.contains('hidden')`)
+const written3 = await fetch(`${base}/api/file?project=${encodeURIComponent(projectPath)}&path=${encodeURIComponent(filePath)}`).then((response) => response.json())
+check('written file starts with code, not the marker', /^#include/.test(written3.text ?? ''), true)
+check('written file has no FILE marker', /FILE:/.test(written3.text ?? ''), false)
+
 console.log(failed ? `\n${failed} check(s) failed (kept ${workDir})` : '\nall checks passed')
 cleanup()
 browser.kill()
