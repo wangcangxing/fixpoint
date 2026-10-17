@@ -10,9 +10,15 @@
  *
  * What we deliberately do NOT do: ship any vendor file. The generated XML is our
  * own text, and `STARTUP.A51` is COPIED FROM THE USER'S INSTALL (BYOK) — never
- * bundled. There is no device database in this install (no `*.uv2` anywhere under
- * the install root), so no device LIST can be offered honestly; the device fields
- * are editable by hand and the default is the verified one.
+ * bundled.
+ *
+ * Device list — CORRECTED 2026-10-17 (an earlier note here claimed the install
+ * had no device database; that was wrong): the install DOES carry one, as
+ * `UV4\UV4.cdb`, and Keil ships `UV4\UVCDB2XML.exe` to export it
+ * (`-f UV4.cdb -a C51` → 1703 C51 devices / 77 vendors, ~0.1 s). That export has
+ * name/vendor/header/description but NOT `DeviceId`, the `Cpu` memory string or
+ * `<OnChipMemories>`, so the defaults below stay the one triple verified on this
+ * machine. Measured: `UV4 -b` builds fine with `<DeviceId>` removed.
  */
 import { outerBlocks } from './keil-core.mjs'
 
@@ -136,12 +142,11 @@ export function c51ProjectXml({
         <TargetCommonOption>
           <Device>${device.device}</Device>
           <Vendor>${device.vendor}</Vendor>
-          <Cpu>${device.cpu}</Cpu>
+          <Cpu>${device.cpu ?? ''}</Cpu>
 ${xml('FlashUtilSpec')}
           <StartupFile>"LIB\\STARTUP.A51" ("Standard 8051 Startup Code")</StartupFile>
 ${xml('FlashDriverDll')}
-          <DeviceId>${device.deviceId}</DeviceId>
-          <RegisterFile>${device.registerFile}</RegisterFile>
+${device.deviceId ? `          <DeviceId>${device.deviceId}</DeviceId>\n` : ''}          <RegisterFile>${device.registerFile}</RegisterFile>
           <OutputDirectory>.\\Objects\\</OutputDirectory>
           <OutputName>${outputName}</OutputName>
           <CreateExecutable>1</CreateExecutable>
@@ -180,17 +185,17 @@ ${xml('FlashDriverDll')}
               <IRO>
                 <Type>1</Type>
                 <StartAddress>0x0</StartAddress>
-                <Size>${device.iromSize}</Size>
+                <Size>${device.iromSize || '0x0'}</Size>
               </IRO>
               <IRA>
                 <Type>0</Type>
                 <StartAddress>0x0</StartAddress>
-                <Size>${device.iramSize}</Size>
+                <Size>${device.iramSize || '0x0'}</Size>
               </IRA>
               <XRA>
                 <Type>0</Type>
                 <StartAddress>0x0</StartAddress>
-                <Size>0x0</Size>
+                <Size>${device.xramSize || '0x0'}</Size>
               </XRA>
             </OnChipMemories>
           </Target51Misc>

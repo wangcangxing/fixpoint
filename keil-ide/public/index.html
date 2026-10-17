@@ -57,6 +57,17 @@
 
       <section class="pane editor">
         <div id="editor"></div>
+        <!-- AI reply diff: side-by-side, Monaco's own green/red decorations. -->
+        <div id="diff-view" class="hidden">
+          <div class="diff-bar">
+            <span id="diff-title">AI 修改对比</span>
+            <span id="diff-stats" class="diff-stats"></span>
+            <span class="spacer"></span>
+            <button id="btn-diff-apply" class="primary tiny">应用修改</button>
+            <button id="btn-diff-close" class="tiny">放弃</button>
+          </div>
+          <div id="diff-editor"></div>
+        </div>
       </section>
 
       <aside class="pane chat">
@@ -79,7 +90,7 @@
           <span class="spacer"></span>
           <button id="btn-send" class="primary">发送</button>
         </div>
-        <button id="btn-apply" disabled>把回复里的代码块写入当前文件…</button>
+        <button id="btn-apply" disabled>对比并应用 AI 修改…</button>
       </aside>
     </main>
 
@@ -131,12 +142,18 @@
         </label>
         <label class="field">
           <span>器件</span>
-          <input type="text" id="np-device" placeholder="AT89C51" />
+          <div class="device-pick">
+            <input type="text" id="np-device" placeholder="输入型号搜索，例如 AT89C52" autocomplete="off" />
+            <div id="np-device-menu" class="device-menu hidden"></div>
+          </div>
         </label>
+        <div class="modal-row">
+          <span class="dim" id="np-device-info">正在读取 Keil 器件库…</span>
+        </div>
         <p class="hint">
           会生成 <code>&lt;工程名&gt;.uvproj</code>、一个 <code>main.c</code> 骨架，并从你本机的安装里拷一份
           <code>STARTUP.A51</code>（不随本程序附带任何厂商文件）。
-          <b>器件只在这台机器上验证过 AT89C51</b>：本机没有器件库，其他型号请自行填对。
+          器件列表读自你本机 Keil 的 <code>UV4.cdb</code>；<b>库里没有的型号（如 STC 系列）</b>请直接用兼容型号（AT89C52）。
         </p>
         <div class="modal-row">
           <button id="btn-new-project-create" class="primary">创建</button>

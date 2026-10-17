@@ -20,6 +20,7 @@ const stage = join(root, 'build', 'app')
 
 const ENGINES = [
   'keil-core.mjs',
+  'keil-devices.mjs',
   'keil-symbols.mjs',
   'keil-completion.mjs',
   'keil-skills.mjs',

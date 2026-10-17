@@ -28,3 +28,4 @@ demo/*.uvgui.*
 
 # 本地留痕报告（不入库）
 reports/
+执行报告-*.md

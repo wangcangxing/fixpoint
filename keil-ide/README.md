@@ -46,7 +46,7 @@ Electron 窗口 (electron-main.mjs)
 | 工具栏 | 工程选择（`settings.json` 的 recent）、编译 `F7`、重编、**hex 状态**（文件名/时间/大小；未启用 `CreateHexFile` 标红）、器件与目标、工具链来源 |
 | 左：文件树 | 工程声明的源文件；**未加入构建的孤儿 `.c/.A51` 标黄告警**（C51 常见坑：文件在目录里但没加进工程，改了不生效） |
 | 中：编辑器 | Monaco + 自注册 `c51` 语言（`sbit`/`sfr`/`interrupt`/`data`/`idata`/`xdata`/`code` 等关键字与常用 SFR 高亮）；`Ctrl+S` 保存、`F7` 编译 |
-| 右：AI 面板 | 可勾选附带**当前文件**与**最近编译错误**；回复里的 ` ```c ` 代码块可一键写回（写前备份、强制无 BOM） |
+| 右：AI 面板 | 可勾选附带**当前文件**与**最近编译错误**；回复里的 ` ```c ` 代码块会**自动并排对比**当前文件（左=当前、右=AI 建议，增绿删红，标 `+N −M`），点"应用修改"才写回（写前备份、强制无 BOM）；指向别的文件时同样先出 diff，但不切换当前标签 |
 | 下：问题面板 | 来自真实编译日志的结构化诊断（文件/行/错误码/消息），点击跳行 |
 
 ## 已验证（本机实测）
@@ -186,7 +186,7 @@ user-invocable: false            # 可选：不出现在用户菜单里（只有
 |---|---|
 | Project → New µVision Project | 工具栏 **新建工程…**：选文件夹 + 工程名 + 器件 → 生成 `<名>.uvproj`、`main.c`，并从你本机安装拷一份 `STARTUP.A51`；**实测能直接编译出 hex** |
 | Project → Open Project | 工具栏 **打开工程…**：原生对话框（`.uvproj` / `.uvprojx` / `.uv2`），打开后进入工程下拉的 recent 列表 |
-| Project → Select Device | 新建工程里的**器件**字段（默认 `AT89C51`，本机实测值）。本机没有器件库（装目录下没有任何 `*.uv2`），所以给不出真实器件列表——其他型号请自己填对 |
+| Project → Select Device | 新建工程里的**器件**字段是**可搜索下拉**，列表读自你本机 Keil 的 `UV4\UV4.cdb`（官方 `UVCDB2XML` 导出 **1703 个 C51 器件 / 77 厂商**）。选中即显示厂商、ROM/RAM、头文件与描述，并把 `Device/Vendor/Cpu/RegisterFile` 与片上内存写进 `.uvproj`；**`DeviceId` 库里取不到，故不写**（实测 `UV4 -b` 不需要）。库里没有的型号（STC 系列）可手填，界面会明确提示内存配置沿用默认值 |
 | File → New (Ctrl+N) | 文件栏 **新建**：按扩展名填骨架（`.c` **不含 `main`**、`.h` 带 include 守卫、`.a51` 汇编骨架），随后询问是否加入工程 |
 | File → Open (Ctrl+O) | 文件栏 **打开**：原生对话框；**支持工程之外的文件**——显式打开后本会话内可读可写，其余写入仍严格限制在工程目录 |
 | File → Save / Save As | `Ctrl+S` 保存 / `Ctrl+Shift+S` 另存为 |
@@ -194,7 +194,24 @@ user-invocable: false            # 可选：不出现在用户菜单里（只有
 
 > 新建工程**不附带任何厂商文件**：`.uvproj` 的 XML 由本程序生成（去掉了调试/烧录/DLL 段，`<Header>` 是我们自己的文字），`STARTUP.A51` 是**从你本机安装里拷贝**的（BYOK）。
 
-**没做**：多工程工作区（`.uvmpw`）、最近文件列表、Save All、Translate/Batch、Export/Manage、Device Database、License Management、Print。
+### 器件库（只读调用本机安装，不改 `UV4.cdb`）
+
+| 接口 | 作用 |
+|---|---|
+| `GET /api/devices` | 全量清单（`name/vendor/includeFile/hasMemory/iromSize/iramSize`）+ 厂商统计；`?q=` 过滤、`?vendor=` 限定厂商、`?limit=` 截断 |
+| `GET /api/device?name=AT89C52&header=1` | 单个器件：完整描述 + 可直接写进 `.uvproj` 的字段 + 头文件里的 SFR/位名 |
+
+数据来源与边界（实测，详见 `../keil-devices.mjs` 顶部注释）：
+
+- 器件名/厂商/头文件/描述来自官方导出器（`UVCDB2XML.exe -f UV4.cdb -a C51`），**XML 本身不合法**（裸 `&`），所以按文本解析。
+- `Cpu` 内存串与 `REGFILE` 来自对 `UV4.cdb` 的字段级扫描；**1703 个器件中 1693 个拿到内存配置**，其余 10 个是 "see XXX" 占位项。268 个无片上 ROM 的型号按 `IRO 0x0` 写（实测可编译），有 RAM 即可建工程（链接器的致命项是 `RAMSIZE`）。
+- **`DeviceId` 没有**：导出器不提供、原始记录里也没对上；实测 `UV4 -b` 在缺省该标签时 0 error，因此不写而不是写错。
+- 2017 年的库**没有 STC / STC15 / N76E003**；这类型号请用兼容的 `AT89C52`，新建工程时会提示"内存沿用默认值"。
+- AI 侧：`/api/chat` 会把 `[当前器件]`（工程器件）与 `[器件库]`（用户在问题里点名的型号，最多 2 个）连同 ROM/RAM、头文件、SFR 一起注入，并在系统提示里要求"以器件库为准、查不到不要编造"。
+
+验收脚本：`node verify/device-library.mjs`（模块）、`node verify/device-integration.mjs`（自带 host：接口 + 生成工程 + 真实编译 + 聊天注入）、`node verify/device-ui.mjs [端口]`（无头 Chrome 真实点击下拉）。
+
+**没做**：多工程工作区（`.uvmpw`）、最近文件列表、Save All、Translate/Batch、Export/Manage、Device Database 编辑（只读调用）、License Management、Print。
 
 ## 打包成可分发的 EXE
 

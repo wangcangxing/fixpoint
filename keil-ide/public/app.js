@@ -477,6 +477,7 @@ async function openFileByPath(path) {
     return undefined
   }
   state.current = { name: baseName(data.path), path: data.path, text: data.text }
+  closeDiff()
   state.dirty = false
   syncState.fileMtime = data.mtimeMs ?? 0
   syncState.conflict = false
@@ -750,6 +751,8 @@ async function send() {
       if (finishReason === 'length') box.bodyEl.appendChild(truncationNote())
       $('transcript').scrollTop = $('transcript').scrollHeight
       $('btn-apply').disabled = !extractCodeBlock(full)
+      // Auto-open the side-by-side diff: current file vs the AI's block.
+      maybeAutoDiff(full)
       return
     }
 
@@ -762,6 +765,7 @@ async function send() {
       appendMessage('err', 'AI 调用失败', `${data.error || '(无错误信息)'}${data.url ? `\nurl: ${data.url}` : ''}`)
     }
     $('btn-apply').disabled = !extractCodeBlock(state.lastReply)
+    maybeAutoDiff(state.lastReply)
   } catch (error) {
     appendMessage('err', 'AI 调用异常', error.message)
   } finally {
@@ -796,6 +800,163 @@ async function applyReply() {
   }
   appendMessage('ai', `已写入 ${baseName(data.path)}`, `${data.bytes} 字节 · ${encodingNote(data.bomFree)}${backupNote(data)}`)
   await openFile(baseName(data.path))
+}
+
+/* ---------- AI diff: 当前文件 ↔ 回复里的代码块（并排、增绿删红） ---------- */
+
+/**
+ * Monaco's DiffEditor gives exactly the requested presentation: left = what is on
+ * disk/buffer now, right = the AI's proposal, added lines green and removed lines
+ * red. It is built once and reused; the models are kept so a new reply only fills
+ * text instead of rebuilding the editor.
+ */
+function ensureDiffEditor() {
+  if (state.diffEditor) return state.diffEditor
+  state.diffModels = {
+    original: monaco.editor.createModel('', 'c51'),
+    modified: monaco.editor.createModel('', 'c51'),
+  }
+  state.diffEditor = monaco.editor.createDiffEditor($('diff-editor'), {
+    theme: 'vs-dark',
+    automaticLayout: true,
+    readOnly: true,
+    originalEditable: false,
+    renderSideBySide: true,
+    // Monaco silently falls back to an inline (one-column) view when the editor is
+    // narrower than ~900px — measured: the editor pane here is ~840px, so without
+    // this the "split" the user asked for would look like a single column.
+    useInlineViewWhenSpaceIsLimited: false,
+    scrollBeyondLastLine: false,
+    fontSize: 13,
+    minimap: { enabled: false },
+    renderOverviewRuler: false,
+    // Each pane is half of a ~840px editor, so long C lines must wrap.
+    wordWrap: 'on',
+    diffWordWrap: 'on',
+  })
+  state.diffEditor.setModel(state.diffModels)
+  return state.diffEditor
+}
+
+/** +added / −removed line counts (LCS); null above ~4M cell pairs to stay snappy. */
+function lineDiffStats(before, after) {
+  const a = String(before).split('\n')
+  const b = String(after).split('\n')
+  if (a.length * b.length > 4000000) return { added: null, removed: null }
+  const width = b.length + 1
+  let previous = new Uint32Array(width)
+  let current = new Uint32Array(width)
+  for (let i = 1; i <= a.length; i += 1) {
+    for (let j = 1; j < width; j += 1) {
+      current[j] = a[i - 1] === b[j - 1] ? previous[j - 1] + 1 : Math.max(previous[j], current[j - 1])
+    }
+    const swap = previous
+    previous = current
+    current = swap
+    current.fill(0)
+  }
+  const common = previous[width - 1]
+  return { added: b.length - common, removed: a.length - common }
+}
+
+/** Show the diff for `original` -> `modified` against `target`. */
+function showDiff(original, modified, target) {
+  ensureDiffEditor()
+  state.diffModels.original.setValue(original)
+  state.diffModels.modified.setValue(modified)
+  state.diffTarget = target
+  state.diffModified = modified
+  const stats = lineDiffStats(original, modified)
+  $('diff-title').textContent = `${baseName(target)} · 当前 ↔ AI 建议`
+  $('diff-stats').innerHTML =
+    stats.added === null
+      ? ''
+      : `<span class="add">+${stats.added}</span> <span class="del">−${stats.removed}</span>`
+  $('diff-view').classList.remove('hidden')
+  // The layer was display:none while hidden, so Monaco must re-measure now.
+  state.diffEditor.layout()
+}
+
+function closeDiff() {
+  const view = $('diff-view')
+  if (!view || view.classList.contains('hidden')) return
+  view.classList.add('hidden')
+  state.diffTarget = ''
+  state.diffModified = ''
+}
+
+/** Which open file does a reply's `FILE:` line refer to? Empty when it is another file. */
+function currentFileMatch(file) {
+  if (!state.current) return ''
+  const target = String(file ?? '').trim()
+  if (!target) return state.current.path
+  return baseName(target).toLowerCase() === state.current.name.toLowerCase() ? state.current.path : ''
+}
+
+/**
+ * Open the diff automatically when a reply carries a code block for the file the
+ * user is looking at. A reply about a different file keeps the old explicit
+ * "write it" button, so nothing is silently switched under the user.
+ */
+function maybeAutoDiff(text = state.lastReply) {
+  const block = extractCodeBlock(text)
+  if (!block || !state.current || !state.editor) return false
+  const target = currentFileMatch(block.file)
+  if (!target) return false
+  const original = state.editor.getValue()
+  if (original === block.code) return false
+  showDiff(original, block.code, target)
+  return true
+}
+
+/** Write the AI side of the diff (the same backup path as a manual save). */
+async function applyDiff() {
+  const target = state.diffTarget
+  if (!target) return
+  const data = await post('/api/file', { project: state.settings.project, path: target, text: state.diffModified })
+  if (data.error) {
+    appendMessage('err', '应用失败', data.error)
+    return
+  }
+  closeDiff()
+  appendMessage('ai', `已写入 ${baseName(data.path)}`, `${data.bytes} 字节 · ${encodingNote(data.bomFree)}${backupNote(data)}`)
+  await openFile(baseName(data.path))
+}
+
+/** Resolve a reply's `FILE:` value to an absolute path (project-relative or absolute). */
+function resolveReplyPath(file) {
+  const value = String(file ?? '').trim()
+  if (!value) return state.current?.path ?? ''
+  if (/^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('\\\\')) return value
+  return absPath(value)
+}
+
+/**
+ * The chat button: show a diff before writing. The open file uses the live buffer
+ * (unsaved edits included); another file is read from disk and stays unopened.
+ * Only when the target cannot be read (e.g. a brand-new file) does it fall back to
+ * the old confirm-and-write flow.
+ */
+async function previewOrApply() {
+  if (maybeAutoDiff()) return
+  const block = extractCodeBlock(state.lastReply)
+  if (!block) return
+  const target = resolveReplyPath(block.file || state.current?.path)
+  if (!target) {
+    appendMessage('err', '应用失败', '回复里没有 FILE: 行，且当前没有打开文件')
+    return
+  }
+  const query = `/api/file?project=${encodeURIComponent(state.settings.project)}&path=${encodeURIComponent(target)}`
+  const data = await api(query).catch(() => null)
+  if (!data || data.error) {
+    await applyReply()
+    return
+  }
+  if (data.text === block.code) {
+    appendMessage('ai', '无需修改', 'AI 给的代码和这个文件一致')
+    return
+  }
+  showDiff(data.text, block.code, data.path)
 }
 
 /* ---------- Settings dialog: AI / 补全 / 编辑器 / 技能 / 诊断 ---------- */
@@ -1946,6 +2107,140 @@ function closeFile() {
   renderFileChip()
 }
 
+/* ---------- 新建工程：器件库选择 ---------- */
+
+/** The whole C51 device list (fetched once) and the device the user picked. */
+let deviceLibrary = null
+let npDevice = null
+const DEVICE_MENU_MAX = 60
+
+async function ensureDeviceLibrary() {
+  if (deviceLibrary) return deviceLibrary
+  const info = $('np-device-info')
+  if (info) info.textContent = '正在读取 Keil 器件库…'
+  const data = await api('/api/devices').catch((error) => ({ error: error.message }))
+  if (data.error) {
+    if (info) info.textContent = `器件库读取失败：${data.error}（仍可手填型号）`
+    return null
+  }
+  deviceLibrary = data
+  if (info) info.textContent = `已从本机 Keil 读到 ${data.total} 个 C51 器件（${data.vendors.length} 个厂商）`
+  return deviceLibrary
+}
+
+/** Filter by substring, prefix matches first. 1703 items is small enough to scan. */
+function deviceMatches(query) {
+  if (!deviceLibrary) return { devices: [], total: 0 }
+  const needle = query.trim().toLowerCase()
+  if (!needle) return { devices: deviceLibrary.devices.slice(0, DEVICE_MENU_MAX), total: deviceLibrary.total }
+  const hits = []
+  for (const device of deviceLibrary.devices) {
+    const at = device.name.toLowerCase().indexOf(needle)
+    if (at !== -1) hits.push({ device, at })
+  }
+  hits.sort((left, right) => (left.at === 0 ? 0 : 1) - (right.at === 0 ? 0 : 1) || left.at - right.at)
+  return { devices: hits.slice(0, DEVICE_MENU_MAX).map((hit) => hit.device), total: hits.length }
+}
+
+/** Place the fixed-position list under the input, flipping up when space is short. */
+function positionDeviceMenu() {
+  const input = $('np-device')
+  const menu = $('np-device-menu')
+  if (!input || !menu || menu.classList.contains('hidden')) return
+  const rect = input.getBoundingClientRect()
+  const gap = 2
+  const margin = 8
+  const below = window.innerHeight - rect.bottom - gap - margin
+  const above = rect.top - gap - margin
+  const openUp = below < 160 && above > below
+  const space = Math.max(120, openUp ? above : below)
+  menu.style.left = `${Math.round(rect.left)}px`
+  menu.style.width = `${Math.round(rect.width)}px`
+  menu.style.maxHeight = `${Math.floor(Math.min(240, space))}px`
+  if (openUp) {
+    menu.style.top = 'auto'
+    menu.style.bottom = `${Math.round(window.innerHeight - rect.top + gap)}px`
+  } else {
+    menu.style.bottom = 'auto'
+    menu.style.top = `${Math.round(rect.bottom + gap)}px`
+  }
+}
+
+function renderDeviceMenu() {
+  const menu = $('np-device-menu')
+  menu.replaceChildren()
+  if (!deviceLibrary) {
+    menu.classList.add('hidden')
+    return
+  }
+  const query = $('np-device').value
+  const { devices, total } = deviceMatches(query)
+  if (!devices.length) {
+    const empty = document.createElement('div')
+    empty.className = 'item'
+    empty.textContent = '没有匹配的器件（可手填型号，内存配置会沿用 AT89C51）'
+    menu.append(empty)
+  }
+  for (const device of devices) {
+    const item = document.createElement('div')
+    item.className = 'item'
+    item.dataset.name = device.name
+    const name = document.createElement('span')
+    name.textContent = device.name
+    const meta = document.createElement('span')
+    meta.className = 'vendor'
+    meta.textContent = `${device.vendor}${device.hasMemory ? '' : ' · 无内存配置'}`
+    item.append(name, meta)
+    // mousedown, not click: the input's blur would hide the menu first.
+    item.onmousedown = (event) => {
+      event.preventDefault()
+      selectDevice(device.name)
+    }
+    menu.append(item)
+  }
+  // Say so when the list is truncated — the count sits on top (sticky) so it is
+  // visible before scrolling, not only after the last row.
+  if (total > devices.length) {
+    const more = document.createElement('div')
+    more.className = 'item more'
+    more.textContent = query.trim()
+      ? `共 ${total} 个匹配，这里显示前 ${devices.length} 个 —— 继续输入可缩小范围`
+      : `共 ${total} 个器件，这里显示前 ${devices.length} 个 —— 输入型号可筛选`
+    menu.prepend(more)
+  }
+  menu.classList.remove('hidden')
+  positionDeviceMenu()
+}
+
+/** Load one device's real parameters and show them under the field. */
+async function selectDevice(name) {
+  const input = $('np-device')
+  input.value = name
+  $('np-device-menu').classList.add('hidden')
+  const info = $('np-device-info')
+  if (info) info.textContent = `正在读取 ${name} 的参数…`
+  const data = await api(`/api/device?name=${encodeURIComponent(name)}`).catch((error) => ({ error: error.message }))
+  if (data.error) {
+    npDevice = null
+    if (info) info.textContent = `读取失败：${data.error}`
+    return
+  }
+  npDevice = data.device
+  const project = data.project || {}
+  const memory = project.iramSize
+    ? `ROM ${project.iromSize || '0x0'} / RAM ${project.iramSize}`
+    : '库中没有内存配置（将沿用默认值）'
+  const description = String(data.device.description ?? '').replace(/\s+/g, ' ').slice(0, 120)
+  if (info) {
+    info.textContent = [
+      `${data.device.vendor} · ${memory} · 头文件 ${project.registerFile || '(无)'}`,
+      description,
+    ]
+      .filter(Boolean)
+      .join(' — ')
+  }
+}
+
 /** The 新建工程 dialog. */
 function openNewProject() {
   const currentDir = state.info?.projectDir ?? ''
@@ -1953,7 +2248,12 @@ function openNewProject() {
   $('np-name').value = 'led'
   $('np-device').value = 'AT89C51'
   $('np-status').textContent = ''
+  npDevice = null
   $('new-project').classList.remove('hidden')
+  ensureDeviceLibrary().then(() => {
+    if (deviceLibrary?.devices.some((device) => device.name === 'AT89C51')) selectDevice('AT89C51')
+    else renderDeviceMenu()
+  })
 }
 
 async function createNewProject() {
@@ -1964,11 +2264,22 @@ async function createNewProject() {
     return
   }
   $('np-status').textContent = '创建中…'
-  const data = await post('/api/project/new', {
-    dir,
-    name,
-    device: { device: $('np-device').value.trim() || 'AT89C51' },
-  }).catch((error) => ({ error: error.message }))
+  const typed = $('np-device').value.trim() || 'AT89C51'
+  // Only trust the picked device when the input still shows it; typing after a
+  // pick must not silently keep the previous chip's memory map.
+  const chosen = npDevice && npDevice.name.toLowerCase() === typed.toLowerCase() ? npDevice : null
+  const device = chosen
+    ? {
+        device: chosen.name,
+        vendor: chosen.vendor,
+        cpu: chosen.cpu,
+        registerFile: chosen.registerFile,
+        iromSize: chosen.iromSize || '0x0',
+        iramSize: chosen.iramSize,
+        xramSize: chosen.xramSize || '0x0',
+      }
+    : { device: typed }
+  const data = await post('/api/project/new', { dir, name, device }).catch((error) => ({ error: error.message }))
   if (data.error) {
     $('np-status').textContent = `失败: ${data.error}`
     return
@@ -1984,11 +2295,17 @@ async function createNewProject() {
     [
       data.project,
       `器件: ${data.device.device}（${data.device.vendor}）`,
+      data.memorySource === 'library' || data.memorySource === 'request'
+        ? `内存: ROM ${data.device.iromSize} / RAM ${data.device.iramSize}（取自器件库）`
+        : '',
+      data.libraryNote ? `⚠ ${data.libraryNote}` : '',
       `生成: ${data.library.join(', ')}`,
       data.startup ? `STARTUP.A51 取自: ${data.startupSource}` : '（本机没找到 STARTUP.A51，未加入工程）',
       '',
       '现在可以直接点"编译"。',
-    ].join('\n'),
+    ]
+      .filter(Boolean)
+      .join('\n'),
   )
 }
 
@@ -2227,7 +2544,12 @@ async function boot() {
   $('skill').onfocus = () => {
     loadSkills()
   }
-  $('btn-apply').onclick = applyReply
+  $('btn-apply').onclick = previewOrApply
+  $('btn-diff-apply').onclick = applyDiff
+  $('btn-diff-close').onclick = closeDiff
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeDiff()
+  })
   $('btn-reveal').onclick = async () => {
     // The server reports what it actually opened: the hex may not exist yet, in
     // which case it opens the folder that will contain it.
@@ -2251,8 +2573,46 @@ async function boot() {
   $('btn-open-file').onclick = openPickedFile
   $('btn-new-project').onclick = openNewProject
   $('btn-open-project').onclick = openProject
-  $('btn-new-project-close').onclick = () => $('new-project').classList.add('hidden')
+  $('btn-new-project-close').onclick = () => {
+    $('new-project').classList.add('hidden')
+    $('np-device-menu').classList.add('hidden')
+  }
   $('btn-new-project-create').onclick = createNewProject
+  $('np-device').addEventListener('input', () => {
+    npDevice = null
+    if (deviceLibrary) renderDeviceMenu()
+    else ensureDeviceLibrary().then(renderDeviceMenu)
+  })
+  $('np-device').addEventListener('focus', () => {
+    if (deviceLibrary) renderDeviceMenu()
+    else ensureDeviceLibrary().then(renderDeviceMenu)
+  })
+  $('np-device').addEventListener('blur', () => {
+    // mousedown on an item prevents the default, so this delay only covers focus
+    // moving away by keyboard/tab.
+    setTimeout(() => $('np-device-menu').classList.add('hidden'), 150)
+  })
+  $('np-device').addEventListener('keydown', (event) => {
+    const menu = $('np-device-menu')
+    if (event.key === 'Escape') menu.classList.add('hidden')
+    if (event.key === 'Enter' && !menu.classList.contains('hidden')) {
+      const first = menu.querySelector('.item[data-name]')
+      if (first) {
+        event.preventDefault()
+        selectDevice(first.dataset.name)
+      }
+    }
+  })
+  // The list is fixed-positioned against the input, so it must follow layout changes.
+  window.addEventListener('resize', positionDeviceMenu)
+  window.addEventListener(
+    'scroll',
+    () => {
+      const menu = $('np-device-menu')
+      if (menu && !menu.classList.contains('hidden')) positionDeviceMenu()
+    },
+    true,
+  )
   // Multi-project workspace (`.uvmpw`).
   $('btn-open-workspace').onclick = openWorkspace
   $('btn-new-workspace').onclick = newWorkspace

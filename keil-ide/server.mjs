@@ -29,6 +29,14 @@ import {
   readProjectInfo,
 } from '../keil-core.mjs'
 import { buildSymbolIndex, resolveC51IncludeDir } from '../keil-symbols.mjs'
+import {
+  deviceBrief,
+  deviceProjectFields,
+  findMentionedDevices,
+  headerSfrNames,
+  loadDeviceLibrary,
+  readDeviceHeader,
+} from '../keil-devices.mjs'
 import { DEFAULT_STOPS, CompletionLruCache, decideMultiline, postprocessCompletion, truncateByTokens } from '../keil-completion.mjs'
 import {
   findProjectRoot,
@@ -379,6 +387,7 @@ const C51_SYSTEM_PROMPT = [
   '- 工程只编译它声明的文件；同目录下未加入工程的 .c 不会参与构建。',
   '- 8051 地址空间编码为 0xSSSS_AAAA：CODE=0xFF00、XDATA=0x0100。',
   '- 常用 SFR 由 <reg51.h> 提供（P0~P3、TMOD、TH0/TL0、SCON、IE、IP…）；sbit 只能定义在 SFR 的位上。',
+  '- 带 [当前器件] / [器件库] 标签的 ROM/RAM/头文件/SFR 来自本机 Keil 器件库，以此为准；库里没有的型号（如 STC 系列）不要编造参数，说明不确定并建议兼容型号（如 AT89C52）。',
   '回答要求：简洁、可执行；给出代码修改时用一个 ```c 代码块输出**完整文件内容**，并在代码块前一行写 `FILE: <绝对路径>`。',
 ].join('\n')
 
@@ -486,6 +495,38 @@ async function projectContext(project) {
   ]
     .filter(Boolean)
     .join('\n')
+}
+
+/**
+ * Device facts for the AI: the project's own device plus any device the user
+ * names in the prompt. Everything here comes from the local Keil library — the
+ * model is told to treat it as the source of truth instead of recalling specs.
+ */
+const sfrCache = new Map()
+async function sfrForDevice(device) {
+  if (sfrCache.has(device.name)) return sfrCache.get(device.name)
+  const read = await readDeviceHeader(run, device).catch(() => ({ ok: false }))
+  const names = read.ok ? headerSfrNames(read.text) : []
+  sfrCache.set(device.name, names)
+  return names
+}
+
+async function deviceLibraryContext(project, prompt) {
+  const library = await loadDeviceLibrary(run).catch(() => undefined)
+  if (!library?.ok) return ''
+  const blocks = []
+  const info = project ? await readProjectInfo(project).catch(() => undefined) : undefined
+  const current = info?.device ? library.byName.get(info.device) : undefined
+  if (current) {
+    const sfr = await sfrForDevice(current)
+    blocks.push(`[当前器件] ${deviceBrief(current, { sfr: sfr.slice(0, 32) })}`)
+  }
+  for (const device of findMentionedDevices(prompt, library.devices, { limit: 2 })) {
+    if (device.name === current?.name) continue
+    const sfr = await sfrForDevice(device)
+    blocks.push(`[器件库] ${deviceBrief(device, { sfr: sfr.slice(0, 20) })}`)
+  }
+  return blocks.join('\n\n')
 }
 
 /**
@@ -1249,7 +1290,25 @@ async function handleApi(req, res, url) {
     await mkdir(targetDir, { recursive: true })
     const projectPath = join(targetDir, `${name}.uvproj`)
     if (await statOrNull(projectPath)) return sendJson(res, 409, { error: `这个文件夹里已经有 ${name}.uvproj 了` })
-    const device = { ...DEFAULT_DEVICE, ...(body.device && typeof body.device === 'object' ? body.device : {}) }
+    const requested = body.device && typeof body.device === 'object' ? body.device : {}
+    const device = { ...DEFAULT_DEVICE, ...requested }
+    // A device picked from the library already carries cpu/memory. When the caller
+    // only sent a name (free-form input, older clients), resolve it here so the
+    // target is never silently built with AT89C51's memory map.
+    let memorySource = requested.cpu ? 'request' : 'default'
+    let libraryNote = ''
+    if (!requested.cpu) {
+      const library = await loadDeviceLibrary(run).catch(() => undefined)
+      const found = library?.ok ? library.byName.get(device.device) : undefined
+      if (found?.hasMemory) {
+        Object.assign(device, deviceProjectFields(found))
+        memorySource = 'library'
+      } else if (found) {
+        libraryNote = `器件库里的 ${device.device} 没有可用的 RAM 配置，已沿用默认值`
+      } else {
+        libraryNote = `器件库里没有 ${device.device}（库停在 2017 年），已沿用默认 AT89C51 的内存配置，请在 µVision 里核对`
+      }
+    }
     const files = []
     // STARTUP.A51 is COPIED FROM THE USER'S INSTALL (BYOK) — nothing is bundled.
     // The compiler's own LIB folder sits next to the INC folder we already resolve.
@@ -1275,6 +1334,8 @@ async function handleApi(req, res, url) {
       project: projectPath,
       dir: targetDir,
       device,
+      memorySource,
+      libraryNote,
       library: files.map((entry) => entry.name),
       startup: startupCopied,
       startupSource,
@@ -1843,6 +1904,53 @@ async function handleApi(req, res, url) {
     })
   }
 
+  if (url.pathname === '/api/devices') {
+    const library = await loadDeviceLibrary(run)
+    if (!library.ok) return sendJson(res, 503, { error: library.error })
+    const query = String(url.searchParams.get('q') ?? '').trim().toLowerCase()
+    const vendor = String(url.searchParams.get('vendor') ?? '').trim()
+    const limit = Math.max(0, Math.min(Number(url.searchParams.get('limit') ?? 0) || 0, library.devices.length))
+    let list = library.devices
+    if (vendor) list = list.filter((device) => device.vendor === vendor)
+    if (query) list = list.filter((device) => device.name.toLowerCase().includes(query))
+    // The dropdown only needs identity + memory; descriptions are fetched per
+    // device so the initial payload stays small.
+    const devices = list.map((device) => ({
+      name: device.name,
+      vendor: device.vendor,
+      includeFile: device.includeFile,
+      hasMemory: device.hasMemory,
+      hasRom: device.hasRom,
+      iromSize: device.iromSize,
+      iramSize: device.iramSize,
+    }))
+    return sendJson(res, 200, {
+      ok: true,
+      dbPath: library.dbPath,
+      total: library.devices.length,
+      count: devices.length,
+      vendors: library.vendors,
+      devices: limit ? devices.slice(0, limit) : devices,
+    })
+  }
+
+  if (url.pathname === '/api/device') {
+    const name = String(url.searchParams.get('name') ?? '').trim()
+    if (!name) return sendJson(res, 400, { error: 'name is required' })
+    const library = await loadDeviceLibrary(run)
+    if (!library.ok) return sendJson(res, 503, { error: library.error })
+    const device = library.byName.get(name)
+    if (!device) return sendJson(res, 404, { error: `器件库里没有 ${name}` })
+    let header = null
+    if (url.searchParams.get('header') === '1') {
+      const read = await readDeviceHeader(run, device)
+      header = read.ok
+        ? { ok: true, path: read.path, bytes: read.text.length, sfr: headerSfrNames(read.text) }
+        : { ok: false, path: read.path, error: read.error }
+    }
+    return sendJson(res, 200, { ok: true, device, project: deviceProjectFields(device), header })
+  }
+
   if (url.pathname === '/api/chat') {
     const body = await readBody(req)
     const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : ''
@@ -1857,7 +1965,9 @@ async function handleApi(req, res, url) {
       return sendJson(res, 200, result)
     }
 
-    const context = await projectContext(project)
+    const context = [await projectContext(project), await deviceLibraryContext(project, prompt)]
+      .filter(Boolean)
+      .join('\n\n')
     // An explicitly chosen skill is injected as extra system instructions.
     let skillBlock = ''
     let skillName = ''

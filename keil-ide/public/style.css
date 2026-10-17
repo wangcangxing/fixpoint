@@ -178,8 +178,34 @@ main { flex: 1 1 auto; display: flex; min-height: 0; min-width: 0; overflow: hid
 .workspace-list .row .bad { color: var(--warn); }
 .hidden { display: none; }
 
-.editor { flex: 1 1 auto; border-left: none; border-right: none; min-width: 0; }
+.editor { flex: 1 1 auto; border-left: none; border-right: none; min-width: 0; position: relative; }
 #editor { width: 100%; height: 100%; }
+
+/* AI diff layer: covers the editor, splits it into 当前文件 | AI 建议. */
+#diff-view {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+}
+#diff-view.hidden { display: none; }
+.diff-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  background: #1b1e24;
+}
+.diff-bar .spacer { flex: 1 1 auto; }
+.diff-stats { font: 11px monospace; }
+.diff-stats .add { color: #6fcf73; }
+.diff-stats .del { color: #ff7b72; }
+#diff-editor { flex: 1 1 auto; min-height: 0; }
 
 .chat { flex: 0 1 clamp(230px, 25vw, 360px); display: flex; flex-direction: column; min-width: 0; }
 #transcript { flex: 1 1 auto; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
@@ -284,6 +310,46 @@ main { flex: 1 1 auto; display: flex; min-height: 0; min-width: 0; overflow: hid
   font: 11px monospace;
 }
 .modal-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+
+/* Device picker (new-project dialog): the list is drawn by app.js, not a <datalist>,
+   so it can show the vendor and memory state on the same row. */
+.device-pick { position: relative; flex: 1 1 auto; min-width: 0; }
+.device-pick input { width: 100%; }
+.device-menu {
+  /* Fixed, not absolute: the dialog's .modal-box has `overflow: hidden`, which
+     clipped the list at the box edge (measured 515 > 450 at 1024x640). app.js
+     positions it against the input's rect and flips it up when space is short. */
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 60;
+  max-height: 240px;
+  overflow: auto;
+  background: #1b1e24;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.55);
+}
+.device-menu .item {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.device-menu .item:hover { background: #2a4a86; }
+.device-menu .vendor { color: var(--dim); font-size: 11px; white-space: nowrap; }
+.device-menu .item.more {
+  position: sticky;
+  top: 0;
+  background: #1b1e24;
+  color: var(--dim);
+  font-size: 11px;
+  cursor: default;
+  border-bottom: 1px solid var(--line);
+}
+.device-menu .item.more:hover { background: #1b1e24; }
 .status {
   margin: 10px 0 0;
   padding: 8px;
