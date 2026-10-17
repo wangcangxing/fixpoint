@@ -197,6 +197,64 @@ console.log(`      restored: ${JSON.stringify(restored)}`)
 check('restore brings back the previous width', near(restored.chat, chatWidth), true)
 check('editor shrinks back', restored.editor < reloaded.editor, true)
 
+// ---- up/down resizing ----------------------------------------------------
+const heights = () =>
+  evaluate(`(() => ({
+    transcript: Math.round(document.getElementById('transcript').getBoundingClientRect().height),
+    controls: Math.round(document.querySelector('.chat-controls').getBoundingClientRect().height),
+    problems: Math.round(document.getElementById('pane-problems').getBoundingClientRect().height),
+    editor: Math.round(document.querySelector('.pane.editor').getBoundingClientRect().height),
+  }))()`)
+const dragY = async (id, dy) => {
+  await evaluate(`(() => {
+    const handle = document.getElementById(${JSON.stringify(id)})
+    const rect = handle.getBoundingClientRect()
+    const x = Math.round(rect.left + 40)
+    const y = Math.round(rect.top + rect.height / 2)
+    handle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y, pointerId: 1 }))
+    window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: x, clientY: y + ${dy}, pointerId: 1 }))
+    window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y + ${dy}, pointerId: 1 }))
+    return true
+  })()`)
+  await new Promise((resolve) => setTimeout(resolve, 200))
+}
+
+const beforeVertical = await heights()
+console.log(`      before vertical: ${JSON.stringify(beforeVertical)}`)
+await dragY('split-reply', 80)
+const afterReply = await heights()
+console.log(`      after reply +80: ${JSON.stringify(afterReply)}`)
+check('reply area grows downwards', near(afterReply.transcript, beforeVertical.transcript + 80), true)
+check('input block gives up the height', afterReply.controls < beforeVertical.controls, true)
+
+await dragY('split-problems', -60)
+const afterProblems = await heights()
+console.log(`      after problems -60: ${JSON.stringify(afterProblems)}`)
+check('problems pane grows upwards', near(afterProblems.problems, beforeVertical.problems + 60), true)
+check('editor gives up the height', near(afterProblems.editor, beforeVertical.editor - 60), true)
+
+// Reload: both vertical sizes must stick.
+await evaluate(`location.reload(); true`)
+await until(`document.readyState === 'complete' && !!document.getElementById('pane-chat')`)
+await new Promise((resolve) => setTimeout(resolve, 900))
+const verticalReloaded = await heights()
+console.log(`      vertical after reload: ${JSON.stringify(verticalReloaded)}`)
+check('reply height survives reload', near(verticalReloaded.transcript, afterReply.transcript), true)
+check('problems height survives reload', near(verticalReloaded.problems, afterProblems.problems), true)
+
+// Double-click resets a vertical splitter to its responsive default.
+await evaluate(`document.getElementById('split-problems').dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); true`)
+await new Promise((resolve) => setTimeout(resolve, 300))
+const resetProblems = await heights()
+console.log(`      after reset: ${JSON.stringify(resetProblems)}`)
+check('double-click resets the problems height', resetProblems.problems < afterProblems.problems - 20, true)
+
+const shot2 = await sendCdp('Page.captureScreenshot', { format: 'png' })
+if (shot2?.data) {
+  await writeFile('verify/screenshot-panes-vertical.png', Buffer.from(shot2.data, 'base64'))
+  console.log('      screenshot: verify/screenshot-panes-vertical.png')
+}
+
 console.log(failed ? `\n${failed} check(s) failed` : '\nall checks passed')
 socket.close()
 browser.kill()

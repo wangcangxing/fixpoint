@@ -249,6 +249,38 @@ main { flex: 1 1 auto; display: flex; min-height: 0; min-width: 0; overflow: hid
 .splitter:hover::after,
 .splitter.dragging::after { left: 1px; width: 3px; background: #3a6fd8; }
 body.resizing { cursor: col-resize; user-select: none; }
+
+/* Horizontal splitter (up/down resize): AI reply area and the problems pane. */
+.splitter-h {
+  flex: 0 0 5px;
+  position: relative;
+  cursor: row-resize;
+  background: transparent;
+  z-index: 4;
+}
+.splitter-h::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 2px;
+  height: 1px;
+  background: var(--line);
+}
+.splitter-h:hover::after,
+.splitter-h.dragging::after { top: 1px; height: 3px; background: #3a6fd8; }
+body.resizing-v { cursor: row-resize; user-select: none; }
+
+/* AI input block. When the reply area is drag-sized, the controls take the leftover
+   height: the scrollable part (skill/preset/textarea) shrinks and scrolls while the
+   send/apply row stays pinned at the bottom. */
+.chat-controls { display: flex; flex-direction: column; flex: 0 0 auto; min-height: 0; }
+.chat-controls-scroll { display: flex; flex-direction: column; flex: 0 0 auto; min-height: 0; }
+.chat-actions { flex: 0 0 auto; }
+.chat.sized #transcript { flex: 0 0 var(--reply-h, 240px); }
+.chat.sized .chat-controls { flex: 1 1 auto; }
+.chat.sized .chat-controls-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.chat.sized .chat-controls-scroll textarea { flex: 1 1 auto; min-height: 64px; }
 #transcript { flex: 1 1 auto; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
 .msg { border: 1px solid var(--line); border-radius: 5px; padding: 6px 8px; white-space: pre-wrap; word-break: break-word; }
 .msg.user { border-color: #3a63b0; background: #20293a; }
@@ -305,7 +337,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 #skill-hint { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat #btn-apply { margin: 0 8px 8px; }
 
-.problems { flex: 0 1 clamp(80px, 15vh, 170px); min-height: 44px; border-top: none; display: flex; flex-direction: column; }
+.problems { flex: 0 0 var(--problems-h, clamp(80px, 15vh, 170px)); min-height: 44px; border-top: none; display: flex; flex-direction: column; }
 .problems li { padding: 2px 6px; cursor: pointer; display: flex; gap: 8px; }
 .problems li:hover { background: #2a2e36; }
 .problems li.error { color: var(--err); }

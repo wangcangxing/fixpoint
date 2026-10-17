@@ -1779,20 +1779,21 @@ function startMonaco() {
 /* ---------- resizable panes + minimisable AI panel ---------- */
 
 /**
- * The three columns are drag-resizable (double-click a splitter resets it) and the
- * AI column can be folded into a narrow rail — "closed" but recoverable, never
- * destroyed. Widths/minimised flag live in localStorage, not settings.json: they
- * are per-machine view state, not project configuration.
+ * Three columns are drag-resizable left/right; the AI reply area and the problems
+ * pane are drag-resizable up/down (double-click a splitter resets it). The AI
+ * column can be folded into a narrow rail — "closed" but recoverable. All of it is
+ * per-machine view state in localStorage, not settings.json.
  */
 const PANE_STORE_KEY = 'fixpoint.panes.v1'
-let paneState = { files: null, chat: null, minimized: false }
+const PANE_DEFAULTS = { files: null, chat: null, reply: null, problems: null, minimized: false }
+let paneState = { ...PANE_DEFAULTS }
 
 function loadPaneState() {
   try {
     const raw = localStorage.getItem(PANE_STORE_KEY)
-    return raw ? { files: null, chat: null, minimized: false, ...JSON.parse(raw) } : { files: null, chat: null, minimized: false }
+    return raw ? { ...PANE_DEFAULTS, ...JSON.parse(raw) } : { ...PANE_DEFAULTS }
   } catch {
-    return { files: null, chat: null, minimized: false }
+    return { ...PANE_DEFAULTS }
   }
 }
 
@@ -1804,11 +1805,19 @@ function savePaneState() {
   }
 }
 
-function applyPaneWidth(which) {
-  const property = which === 'files' ? '--files-w' : '--chat-w'
+const PANE_PROPERTIES = {
+  files: '--files-w',
+  chat: '--chat-w',
+  reply: '--reply-h',
+  problems: '--problems-h',
+}
+
+function applyPaneSize(which) {
+  const property = PANE_PROPERTIES[which]
   const value = paneState[which]
   if (Number.isFinite(value)) document.documentElement.style.setProperty(property, `${value}px`)
   else document.documentElement.style.removeProperty(property)
+  if (which === 'reply') $('pane-chat').classList.toggle('sized', Number.isFinite(value))
 }
 
 function setChatMinimized(minimized, { persist = true } = {}) {
@@ -1824,13 +1833,16 @@ function setChatMinimized(minimized, { persist = true } = {}) {
   })
 }
 
-function startSplitterDrag(which, handle, event) {
+/** Left/right splitter: files | editor | AI. */
+function startColumnDrag(which, handle, event) {
   event.preventDefault()
   const pane = $(which === 'files' ? 'pane-files' : 'pane-chat')
   const startX = event.clientX
   const startWidth = pane.getBoundingClientRect().width
   const editorMinimum = 320
-  const otherPane = which === 'files' ? (paneState.minimized ? 42 : (paneState.chat ?? 340)) : (paneState.files ?? 230)
+  const otherPane = which === 'files'
+    ? (paneState.minimized ? 42 : (paneState.chat ?? 340))
+    : (paneState.files ?? 230)
   const room = window.innerWidth - otherPane - editorMinimum - 20
   const minimum = which === 'files' ? 150 : 240
   const maximum = Math.max(minimum, Math.min(which === 'files' ? 520 : 760, room))
@@ -1840,7 +1852,7 @@ function startSplitterDrag(which, handle, event) {
     const delta = which === 'files' ? moveEvent.clientX - startX : startX - moveEvent.clientX
     const width = Math.round(Math.min(maximum, Math.max(minimum, startWidth + delta)))
     paneState[which] = width
-    applyPaneWidth(which)
+    applyPaneSize(which)
   }
   const finish = () => {
     handle.classList.remove('dragging')
@@ -1853,37 +1865,98 @@ function startSplitterDrag(which, handle, event) {
   window.addEventListener('pointerup', finish)
 }
 
-/** Keep the editor usable when the window shrinks below the stored pane widths. */
+/**
+ * Up/down splitter: the AI reply area (above) and the problems pane (below).
+ * `reply` grows downwards; `problems` grows upwards (drag the bar up).
+ */
+function startRowDrag(which, handle, event) {
+  event.preventDefault()
+  const chatPane = $('pane-chat')
+  const startY = event.clientY
+  const startHeight = which === 'reply'
+    ? $('transcript').getBoundingClientRect().height
+    : $('pane-problems').getBoundingClientRect().height
+  const minimum = which === 'reply' ? 80 : 60
+  // Always leave a usable input area (reply) / editor (problems).
+  const maximum = which === 'reply'
+    ? Math.max(minimum, chatPane.getBoundingClientRect().height - 160)
+    : Math.max(minimum, Math.min(420, window.innerHeight * 0.45))
+  handle.classList.add('dragging')
+  document.body.classList.add('resizing-v')
+  const move = (moveEvent) => {
+    const delta = which === 'reply' ? moveEvent.clientY - startY : startY - moveEvent.clientY
+    const height = Math.round(Math.min(maximum, Math.max(minimum, startHeight + delta)))
+    paneState[which] = height
+    applyPaneSize(which)
+  }
+  const finish = () => {
+    handle.classList.remove('dragging')
+    document.body.classList.remove('resizing-v')
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', finish)
+    savePaneState()
+  }
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', finish)
+}
+
+/** Keep the editor usable when the window shrinks below the stored pane sizes. */
 function fitPanesToWindow() {
   const editorMinimum = 320
   const files = $('pane-files')?.getBoundingClientRect().width ?? 0
   const chat = paneState.minimized ? 42 : ($('pane-chat')?.getBoundingClientRect().width ?? 0)
   const overflow = files + chat - (window.innerWidth - editorMinimum - 20)
-  if (overflow <= 0) return
-  if (!paneState.minimized && Number.isFinite(paneState.chat) && chat > 240) {
-    paneState.chat = Math.max(240, Math.round(chat - overflow))
-    applyPaneWidth('chat')
-  } else if (Number.isFinite(paneState.files) && files > 150) {
-    paneState.files = Math.max(150, Math.round(files - overflow))
-    applyPaneWidth('files')
+  if (overflow > 0) {
+    if (!paneState.minimized && Number.isFinite(paneState.chat) && chat > 240) {
+      paneState.chat = Math.max(240, Math.round(chat - overflow))
+      applyPaneSize('chat')
+    } else if (Number.isFinite(paneState.files) && files > 150) {
+      paneState.files = Math.max(150, Math.round(files - overflow))
+      applyPaneSize('files')
+    }
+  }
+  if (Number.isFinite(paneState.problems)) {
+    const maximum = Math.max(60, Math.min(420, Math.round(window.innerHeight * 0.45)))
+    if (paneState.problems > maximum) {
+      paneState.problems = maximum
+      applyPaneSize('problems')
+    }
+  }
+  if (Number.isFinite(paneState.reply)) {
+    const maximum = Math.max(80, $('pane-chat').getBoundingClientRect().height - 160)
+    if (paneState.reply > maximum) {
+      paneState.reply = Math.round(maximum)
+      applyPaneSize('reply')
+    }
   }
   savePaneState()
 }
 
 function initPanes() {
   paneState = loadPaneState()
-  applyPaneWidth('files')
-  applyPaneWidth('chat')
+  for (const which of ['files', 'chat', 'reply', 'problems']) applyPaneSize(which)
   setChatMinimized(paneState.minimized === true, { persist: false })
   for (const [which, id] of [
     ['files', 'split-files'],
     ['chat', 'split-chat'],
   ]) {
     const handle = $(id)
-    handle.addEventListener('pointerdown', (event) => startSplitterDrag(which, handle, event))
+    handle.addEventListener('pointerdown', (event) => startColumnDrag(which, handle, event))
     handle.addEventListener('dblclick', () => {
       paneState[which] = null
-      applyPaneWidth(which)
+      applyPaneSize(which)
+      savePaneState()
+    })
+  }
+  for (const [which, id] of [
+    ['reply', 'split-reply'],
+    ['problems', 'split-problems'],
+  ]) {
+    const handle = $(id)
+    handle.addEventListener('pointerdown', (event) => startRowDrag(which, handle, event))
+    handle.addEventListener('dblclick', () => {
+      paneState[which] = null
+      applyPaneSize(which)
       savePaneState()
     })
   }

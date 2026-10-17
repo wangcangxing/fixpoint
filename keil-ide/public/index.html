@@ -83,6 +83,9 @@
           <button id="btn-chat-min" class="tiny" title="最小化 AI 面板（右侧竖条可恢复）">最小化</button>
         </div>
         <div id="transcript"></div>
+        <div class="splitter-h" id="split-reply" title="上下拖动调整回复区高度（双击复位）"></div>
+        <div class="chat-controls">
+        <div class="chat-controls-scroll">
         <div class="row">
           <label for="skill">技能</label>
           <select id="skill"><option value="">（不用技能）</option></select>
@@ -94,6 +97,8 @@
           <span id="preset-hint" class="dim"></span>
         </div>
         <textarea id="prompt" rows="4" placeholder="例如：这个呼吸灯为什么看不出渐变？帮我改成分段亮度（也可以用 /技能名 开头）"></textarea>
+        </div>
+        <div class="chat-actions">
         <div class="row">
           <label><input type="checkbox" id="ctx-file" checked /> 附带当前文件</label>
           <label><input type="checkbox" id="ctx-errors" checked /> 附带编译错误</label>
@@ -102,10 +107,14 @@
         </div>
         <button id="btn-apply" disabled>对比并应用 AI 修改…</button>
         </div>
+        </div>
+        </div>
       </aside>
     </main>
 
-    <footer class="pane problems">
+    <div class="splitter-h" id="split-problems" title="上下拖动调整问题面板高度（双击复位）"></div>
+
+    <footer class="pane problems" id="pane-problems">
       <div class="pane-title">问题 <span id="problem-count" class="dim"></span></div>
       <ul id="problems"></ul>
     </footer>
