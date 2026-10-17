@@ -1051,7 +1051,7 @@ async function refreshSkillsAdmin() {
 async function installSkillFromForm() {
   const source = $('skills-source').value.trim()
   if (!source) {
-    $('settings-status').textContent = '请填写技能来源（.md 文件、含 SKILL.md 的目录，或 .zip）'
+    $('settings-status').textContent = '请先选择技能来源（点"选择文件…"或"选择文件夹…"）'
     return
   }
   const result = await post('/api/skills/install', {
@@ -1066,6 +1066,38 @@ async function installSkillFromForm() {
   if (result.ok) $('skills-source').value = ''
   await loadSkills()
   await refreshSkillsAdmin()
+}
+
+/**
+ * Pick the skill source with a native dialog, so nobody has to type a path.
+ *
+ * `kind === 'file'` takes a `.md` / `.prompt` / `.zip`; `kind === 'dir'` takes a
+ * directory bundle. They are two calls because Windows cannot show a dialog that
+ * selects files AND folders at once.
+ */
+async function pickSkillSource(kind) {
+  const startDir = state.info?.projectDir || ''
+  const data =
+    kind === 'dir'
+      ? await post('/api/pick-folder', {
+          title: '选择技能文件夹（里面要有 SKILL.md）',
+          defaultPath: startDir,
+        }).catch((error) => ({ error: error.message }))
+      : await post('/api/pick-file', {
+          title: '选择技能文件',
+          defaultPath: startDir,
+          filters: [
+            { name: '技能文件', extensions: ['md', 'prompt', 'zip'] },
+            { name: '全部文件', extensions: ['*'] },
+          ],
+        }).catch((error) => ({ error: error.message }))
+  if (data.error) {
+    $('settings-status').textContent = data.error
+    return
+  }
+  if (!data.ok) return // the user cancelled
+  $('skills-source').value = data.path
+  $('settings-status').textContent = `已选择 ${data.path}，点"安装"即可`
 }
 
 /** Remove an installed skill from this IDE's own table. */
@@ -2882,6 +2914,8 @@ async function boot() {
   }
   $('btn-reload-skills').onclick = refreshSkillsAdmin
   $('btn-install-skill').onclick = installSkillFromForm
+  $('btn-pick-skill-file').onclick = () => pickSkillSource('file')
+  $('btn-pick-skill-dir').onclick = () => pickSkillSource('dir')
   $('btn-open-skills-dir').onclick = () => {
     const roots = state.skillRoots ?? []
     const root = roots.find((item) => item.source === 'project-ide') ?? roots.find((item) => item.rank <= 400) ?? roots[0]

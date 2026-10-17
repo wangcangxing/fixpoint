@@ -1077,6 +1077,29 @@ function sendFile(res, path) {
   createReadStream(path).pipe(res)
 }
 
+/**
+ * Validate dialog filters coming from the page.
+ *
+ * Electron refuses an entry with an empty `extensions` list, and `'*'` is the
+ * only wildcard it understands — so anything empty is dropped instead of being
+ * passed through and blowing up the native dialog. `undefined` means "caller has
+ * no opinion, use the endpoint's default".
+ */
+function pickerFilters(value) {
+  if (!Array.isArray(value)) return undefined
+  const list = []
+  for (const entry of value) {
+    if (!entry || !Array.isArray(entry.extensions)) continue
+    const extensions = entry.extensions
+      .map((ext) => String(ext).replace(/^\./, '').trim())
+      .filter(Boolean)
+      .slice(0, 20)
+    if (!extensions.length) continue
+    list.push({ name: String(entry.name ?? '文件').slice(0, 60), extensions })
+  }
+  return list.length ? list : undefined
+}
+
 /** API routing. */
 async function handleApi(req, res, url) {
   const settings = await loadSettings()
@@ -1349,21 +1372,41 @@ async function handleApi(req, res, url) {
     // An explicit path is accepted so the flow can be driven by tests (and later by
     // drag & drop); otherwise the desktop shell opens a native dialog.
     let chosen = String(body.path ?? '').trim()
+    // Same three complaints /api/pick-folder got, fixed the same way: the title was
+    // hardcoded, there was no start folder (Windows reopened wherever it last was),
+    // and the dialog had no parent window. Callers may also narrow the file types,
+    // which is what the skill installer needs (.md/.prompt/.zip, not every source).
+    const title = String(body.title ?? '').trim() || (wantsProject ? '打开工程' : wantsWorkspace ? '打开工作区' : '打开文件')
+    const wantedStart = String(body.defaultPath ?? '').trim()
+    const defaultPath = wantedStart && (await statOrNull(wantedStart)) ? wantedStart : ''
+    const filters =
+      pickerFilters(body.filters) ??
+      (wantsWorkspace
+        ? [{ name: '工作区文件', extensions: ['uvmpw'] }]
+        : wantsProject
+          ? [{ name: '工程文件', extensions: ['uvproj', 'uvprojx', 'uv2'] }]
+          : [{ name: '源文件', extensions: ['c', 'h', 'a51', 's', 'inc', 'txt', 'md', 'uvproj'] }, { name: '全部文件', extensions: ['*'] }])
+    if (body.dryRun === true) {
+      // Lets the tests assert the dialog's decisions without opening a window.
+      return sendJson(res, 200, {
+        ok: true,
+        dryRun: true,
+        title,
+        defaultPath,
+        filters,
+        parented: Boolean(process.versions.electron),
+      })
+    }
     if (!chosen) {
       if (!process.versions.electron) {
         return sendJson(res, 501, { error: '当前不是桌面应用模式，请直接填写文件路径' })
       }
       try {
-        const { dialog } = await import('electron')
-        const result = await dialog.showOpenDialog({
-          title: wantsProject ? '打开工程' : wantsWorkspace ? '打开工作区' : '打开文件',
-          properties: ['openFile'],
-          filters: wantsWorkspace
-            ? [{ name: '工作区文件', extensions: ['uvmpw'] }]
-            : wantsProject
-              ? [{ name: '工程文件', extensions: ['uvproj', 'uvprojx', 'uv2'] }]
-              : [{ name: '源文件', extensions: ['c', 'h', 'a51', 's', 'inc', 'txt', 'md', 'uvproj'] }, { name: '全部文件', extensions: ['*'] }],
-        })
+        const { dialog, BrowserWindow } = await import('electron')
+        const parent = BrowserWindow.getAllWindows()[0]
+        const options = { title, properties: ['openFile'], filters }
+        if (defaultPath) options.defaultPath = defaultPath
+        const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options)
         if (result.canceled) return sendJson(res, 200, { ok: false, canceled: true })
         chosen = result.filePaths?.[0] ?? ''
       } catch (error) {

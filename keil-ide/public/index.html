@@ -388,10 +388,16 @@
             <code>~/.keil-ai/skills</code>、随包内置），不会读别人 <code>.dsh/skills</code>、
             <code>.agents/skills</code> 的技能。打开后才会额外扫描那三个共享目录。
           </p>
-          <label class="field">
+          <div class="field">
             <span>安装技能</span>
-            <input type="text" id="skills-source" placeholder="绝对路径：.md 文件、含 SKILL.md 的目录，或 .zip" />
-          </label>
+            <input type="text" id="skills-source" placeholder="点右侧按钮选择，或直接填绝对路径" />
+            <button id="btn-pick-skill-file">选择文件…</button>
+            <button id="btn-pick-skill-dir">选择文件夹…</button>
+          </div>
+          <p class="hint">
+            技能来源可以是 <code>.md</code> / <code>.prompt</code> 单文件、含 <code>SKILL.md</code> 的文件夹，
+            或 <code>.zip</code> 压缩包。用上面的按钮挑好之后，点下面的"安装"。
+          </p>
           <div class="modal-row">
             <label><input type="checkbox" id="skills-force" /> 覆盖同名</label>
             <select id="skills-scope">
