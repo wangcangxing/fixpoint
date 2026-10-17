@@ -35,7 +35,7 @@
     </header>
 
     <main>
-      <aside class="pane files">
+      <aside class="pane files" id="pane-files">
         <div class="pane-title">
           <span>工程文件</span>
           <span class="spacer"></span>
@@ -55,6 +55,8 @@
         <ul id="tree"></ul>
       </aside>
 
+      <div class="splitter" id="split-files" title="拖动调整文件树宽度（双击复位）"></div>
+
       <section class="pane editor">
         <div id="editor"></div>
         <!-- AI reply diff: side-by-side, Monaco's own green/red decorations. -->
@@ -70,8 +72,16 @@
         </div>
       </section>
 
-      <aside class="pane chat">
-        <div class="pane-title">AI 助手 <span id="ai-chip" class="dim">—</span></div>
+      <div class="splitter" id="split-chat" title="拖动调整 AI 栏宽度（双击复位）"></div>
+
+      <aside class="pane chat" id="pane-chat">
+        <button id="btn-chat-restore" class="chat-restore" title="恢复 AI 面板">AI 助手</button>
+        <div class="chat-body">
+        <div class="pane-title">
+          AI 助手 <span id="ai-chip" class="dim">—</span>
+          <span class="spacer"></span>
+          <button id="btn-chat-min" class="tiny" title="最小化 AI 面板（右侧竖条可恢复）">最小化</button>
+        </div>
         <div id="transcript"></div>
         <div class="row">
           <label for="skill">技能</label>
@@ -91,6 +101,7 @@
           <button id="btn-send" class="primary">发送</button>
         </div>
         <button id="btn-apply" disabled>对比并应用 AI 修改…</button>
+        </div>
       </aside>
     </main>
 

@@ -111,7 +111,7 @@ main { flex: 1 1 auto; display: flex; min-height: 0; min-width: 0; overflow: hid
 .pane-title > .spacer { flex: 1 1 auto; }
 .pane-title > button { flex: 0 0 auto; }
 /* Side panes scale with the window (clamp) instead of being pinned to fixed px. */
-.files { flex: 0 1 clamp(150px, 17vw, 230px); border-right: none; display: flex; flex-direction: column; }
+.files { flex: 0 0 var(--files-w, clamp(150px, 17vw, 230px)); border-right: none; display: flex; flex-direction: column; }
 .files ul, .problems ul { list-style: none; margin: 0; padding: 4px; overflow: auto; flex: 1 1 auto; }
 .files ul.children { padding: 0; overflow: visible; }
 .files .node-row {
@@ -207,7 +207,48 @@ main { flex: 1 1 auto; display: flex; min-height: 0; min-width: 0; overflow: hid
 .diff-stats .del { color: #ff7b72; }
 #diff-editor { flex: 1 1 auto; min-height: 0; }
 
-.chat { flex: 0 1 clamp(230px, 25vw, 360px); display: flex; flex-direction: column; min-width: 0; }
+.chat { flex: 0 0 var(--chat-w, clamp(230px, 25vw, 360px)); display: flex; flex-direction: column; min-width: 0; }
+.chat-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; min-width: 0; }
+
+/* Minimised AI panel: a narrow vertical rail, not a closed panel. */
+.chat.minimized { flex: 0 0 42px; }
+.chat.minimized .chat-body { display: none; }
+.chat-restore {
+  display: none;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  writing-mode: vertical-rl;
+  letter-spacing: 3px;
+  background: #1b1e24;
+  color: var(--dim);
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+}
+.chat.minimized .chat-restore { display: flex; }
+.chat-restore:hover { color: #cfe0ff; background: #23262d; }
+
+/* Column splitter between panes (drag to resize, double-click to reset). */
+.splitter {
+  flex: 0 0 5px;
+  position: relative;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 4;
+}
+.splitter::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 1px;
+  background: var(--line);
+}
+.splitter:hover::after,
+.splitter.dragging::after { left: 1px; width: 3px; background: #3a6fd8; }
+body.resizing { cursor: col-resize; user-select: none; }
 #transcript { flex: 1 1 auto; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
 .msg { border: 1px solid var(--line); border-radius: 5px; padding: 6px 8px; white-space: pre-wrap; word-break: break-word; }
 .msg.user { border-color: #3a63b0; background: #20293a; }

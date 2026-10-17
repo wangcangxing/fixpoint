@@ -1776,6 +1776,122 @@ function startMonaco() {
   })
 }
 
+/* ---------- resizable panes + minimisable AI panel ---------- */
+
+/**
+ * The three columns are drag-resizable (double-click a splitter resets it) and the
+ * AI column can be folded into a narrow rail — "closed" but recoverable, never
+ * destroyed. Widths/minimised flag live in localStorage, not settings.json: they
+ * are per-machine view state, not project configuration.
+ */
+const PANE_STORE_KEY = 'fixpoint.panes.v1'
+let paneState = { files: null, chat: null, minimized: false }
+
+function loadPaneState() {
+  try {
+    const raw = localStorage.getItem(PANE_STORE_KEY)
+    return raw ? { files: null, chat: null, minimized: false, ...JSON.parse(raw) } : { files: null, chat: null, minimized: false }
+  } catch {
+    return { files: null, chat: null, minimized: false }
+  }
+}
+
+function savePaneState() {
+  try {
+    localStorage.setItem(PANE_STORE_KEY, JSON.stringify(paneState))
+  } catch {
+    // private mode / storage full: the layout just will not stick
+  }
+}
+
+function applyPaneWidth(which) {
+  const property = which === 'files' ? '--files-w' : '--chat-w'
+  const value = paneState[which]
+  if (Number.isFinite(value)) document.documentElement.style.setProperty(property, `${value}px`)
+  else document.documentElement.style.removeProperty(property)
+}
+
+function setChatMinimized(minimized, { persist = true } = {}) {
+  $('pane-chat').classList.toggle('minimized', minimized)
+  $('split-chat').classList.toggle('hidden', minimized)
+  paneState.minimized = minimized
+  if (persist) savePaneState()
+  // The editor gained/lost width; Monaco's automaticLayout handles the normal
+  // editor, but the diff layer may need an explicit measure.
+  requestAnimationFrame(() => {
+    state.editor?.layout()
+    if (state.diffEditor) state.diffEditor.layout()
+  })
+}
+
+function startSplitterDrag(which, handle, event) {
+  event.preventDefault()
+  const pane = $(which === 'files' ? 'pane-files' : 'pane-chat')
+  const startX = event.clientX
+  const startWidth = pane.getBoundingClientRect().width
+  const editorMinimum = 320
+  const otherPane = which === 'files' ? (paneState.minimized ? 42 : (paneState.chat ?? 340)) : (paneState.files ?? 230)
+  const room = window.innerWidth - otherPane - editorMinimum - 20
+  const minimum = which === 'files' ? 150 : 240
+  const maximum = Math.max(minimum, Math.min(which === 'files' ? 520 : 760, room))
+  handle.classList.add('dragging')
+  document.body.classList.add('resizing')
+  const move = (moveEvent) => {
+    const delta = which === 'files' ? moveEvent.clientX - startX : startX - moveEvent.clientX
+    const width = Math.round(Math.min(maximum, Math.max(minimum, startWidth + delta)))
+    paneState[which] = width
+    applyPaneWidth(which)
+  }
+  const finish = () => {
+    handle.classList.remove('dragging')
+    document.body.classList.remove('resizing')
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', finish)
+    savePaneState()
+  }
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', finish)
+}
+
+/** Keep the editor usable when the window shrinks below the stored pane widths. */
+function fitPanesToWindow() {
+  const editorMinimum = 320
+  const files = $('pane-files')?.getBoundingClientRect().width ?? 0
+  const chat = paneState.minimized ? 42 : ($('pane-chat')?.getBoundingClientRect().width ?? 0)
+  const overflow = files + chat - (window.innerWidth - editorMinimum - 20)
+  if (overflow <= 0) return
+  if (!paneState.minimized && Number.isFinite(paneState.chat) && chat > 240) {
+    paneState.chat = Math.max(240, Math.round(chat - overflow))
+    applyPaneWidth('chat')
+  } else if (Number.isFinite(paneState.files) && files > 150) {
+    paneState.files = Math.max(150, Math.round(files - overflow))
+    applyPaneWidth('files')
+  }
+  savePaneState()
+}
+
+function initPanes() {
+  paneState = loadPaneState()
+  applyPaneWidth('files')
+  applyPaneWidth('chat')
+  setChatMinimized(paneState.minimized === true, { persist: false })
+  for (const [which, id] of [
+    ['files', 'split-files'],
+    ['chat', 'split-chat'],
+  ]) {
+    const handle = $(id)
+    handle.addEventListener('pointerdown', (event) => startSplitterDrag(which, handle, event))
+    handle.addEventListener('dblclick', () => {
+      paneState[which] = null
+      applyPaneWidth(which)
+      savePaneState()
+    })
+  }
+  $('btn-chat-min').onclick = () => setChatMinimized(true)
+  $('btn-chat-restore').onclick = () => setChatMinimized(false)
+  window.addEventListener('resize', fitPanesToWindow)
+}
+
 /* ---------- following files changed by other programs ---------- */
 
 /** Small toolbar chip: what the external-change watcher is doing right now. */
@@ -2492,6 +2608,8 @@ async function workspaceRemove(project) {
 /* ---------- boot ---------- */
 
 async function boot() {
+  // Apply the stored pane widths BEFORE Monaco measures its container.
+  initPanes()
   await startMonaco()
   const settings = await api('/api/settings')
   state.settings = settings
