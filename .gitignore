@@ -25,3 +25,6 @@ demo/Listings/
 demo/*.uvgui.*
 # 任何位置的备份目录（含测试时产生的）
 .backups/
+
+# 本地留痕报告（不入库）
+reports/
