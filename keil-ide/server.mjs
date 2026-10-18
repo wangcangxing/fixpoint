@@ -167,10 +167,14 @@ const run = makeNodeRunner()
 const chatMeter = new TokenMeter()
 const completeMeter = new TokenMeter()
 
-/** Seeded on first run so the window is never empty; edit freely in settings.json. */
+/**
+ * First-run seed. Deliberately machine-independent: an earlier version seeded the
+ * author's own `E:\单片机\作业2\C program.uvproj`, so EVERY other install opened a
+ * file that does not exist there ("未找到文件 …作业2"). No path may be baked in.
+ */
 const DEFAULT_SETTINGS = {
-  project: 'E:\\单片机\\作业2\\C program.uvproj',
-  recent: ['E:\\单片机\\作业2\\C program.uvproj', 'E:\\单片机\\作业1\\C program\\led.uvproj'],
+  project: '',
+  recent: [],
   // Multi-project workspace (`.uvmpw`); empty = single-project mode.
   workspace: '',
   recentWorkspaces: [],
@@ -246,14 +250,35 @@ const MIME = {
   '.svg': 'image/svg+xml',
 }
 
-/** Read settings, creating the file from the defaults on first use. */
+/**
+ * Read settings, creating the file from the defaults on first use.
+ *
+ * Paths in it are machine-specific: published builds used to seed the author's own
+ * project, so a fresh install on someone else's PC tried to open a file that is not
+ * there. A missing project is dropped in memory (and stale `recent` entries are
+ * hidden) but the file is NOT rewritten here — an unplugged network drive must not
+ * erase the user's history on a read. The next real save persists the cleaned list.
+ */
 async function loadSettings() {
+  let settings
   try {
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(await readFile(SETTINGS_PATH, 'utf8')) }
+    settings = { ...DEFAULT_SETTINGS, ...JSON.parse(await readFile(SETTINGS_PATH, 'utf8')) }
   } catch {
+    settings = { ...DEFAULT_SETTINGS }
     await writeFile(SETTINGS_PATH, `${JSON.stringify(DEFAULT_SETTINGS, null, 2)}\n`, 'utf8')
-    return { ...DEFAULT_SETTINGS }
   }
+  const exists = async (value) => Boolean(value) && Boolean(await statOrNull(String(value)))
+  if (settings.project && !(await exists(settings.project))) {
+    settings = { ...settings, project: '' }
+  }
+  if (Array.isArray(settings.recent)) {
+    const kept = []
+    for (const entry of settings.recent) {
+      if (await exists(entry)) kept.push(entry)
+    }
+    if (kept.length !== settings.recent.length) settings = { ...settings, recent: kept }
+  }
+  return settings
 }
 
 /** Persist settings; the `ai`, `editor` and `skills` groups merge one level deep
@@ -1322,6 +1347,7 @@ async function handleApi(req, res, url) {
   if (url.pathname === '/api/build') {
     const body = await readBody(req)
     const project = body.project || settings.project
+    if (!project) return sendJson(res, 400, { error: '还没有打开工程：先点「新建工程…」或「打开工程…」' })
     const mode = body.mode === 'rebuild' ? 'rebuild' : body.mode === 'clean' ? 'clean' : 'build'
     try {
       const value = await buildProject(run, { project, mode })

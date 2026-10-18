@@ -2533,6 +2533,15 @@ async function refreshProjectSelect() {
   const select = $('project')
   const options = [...new Set([state.settings.project, ...(state.settings.recent || [])])].filter(Boolean)
   select.textContent = ''
+  if (!options.length) {
+    // First run (or a project that no longer exists): say so instead of showing a
+    // blank box — the old build seeded a path from the author's own machine here.
+    const option = document.createElement('option')
+    option.value = ''
+    option.textContent = '（还没有打开工程）'
+    select.appendChild(option)
+    return
+  }
   for (const project of options) {
     const option = document.createElement('option')
     option.value = project
@@ -3221,7 +3230,23 @@ async function boot() {
       $('toolchain-chip').textContent = '编译器: 检查失败'
     })
 
-  await loadProject(settings.project)
+  if (settings.project) {
+    await loadProject(settings.project)
+  } else {
+    // No project is a normal first-run state, not an error. The old default baked
+    // in the author's own path, so every other machine opened a missing file.
+    appendMessage(
+      'ai',
+      '欢迎使用 Fixpoint',
+      [
+        '还没有打开工程。点右上角：',
+        '· 「新建工程…」：选一个空文件夹，自动生成 .uvproj + main.c + STARTUP.A51',
+        '· 「打开工程…」：打开已有的 .uvproj（Keil 新建的也可以）',
+        '',
+        '编译器用的是你本机装的 Keil C51；没装的话，编辑器、补全和 AI 仍然能用。',
+      ].join('\n'),
+    )
+  }
   await refreshTokens()
   await loadPresets()
   startSync()
