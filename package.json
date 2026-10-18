@@ -1,6 +1,6 @@
 {
   "name": "fixpoint-build",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "author": "wangcangxing",
   "description": "构建入口清单。应用本体在 keil-ide/（有自己的 package.json），这里是给 electron-builder 读 name/version 元数据用的；暂存产物在 build/app，安装包输出在 build/installer。",
