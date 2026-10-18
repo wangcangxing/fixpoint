@@ -423,6 +423,39 @@ body.resizing-v { cursor: row-resize; user-select: none; }
   border-bottom: 1px solid var(--line);
 }
 .device-menu .item.more:hover { background: #1b1e24; }
+/* Chat-side model / reasoning picker: same fixed-position popover as the device menu,
+   because the chat footer has its own overflow handling and a clipped menu is worse
+   than one that flips upward. */
+.model-menu {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 70;
+  min-width: 190px;
+  max-height: 300px;
+  overflow: auto;
+  padding: 4px 0;
+  background: #1b1e24;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.55);
+}
+.model-menu .group {
+  padding: 4px 8px 2px;
+  color: var(--dim);
+  font-size: 11px;
+}
+.model-menu .item {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.model-menu .item:hover { background: #2a4a86; }
+.model-menu .item.on { color: var(--accent); }
+.model-menu .item .meta { color: var(--dim); font-size: 11px; white-space: nowrap; }
 .status {
   margin: 10px 0 0;
   padding: 8px;

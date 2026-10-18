@@ -10,8 +10,10 @@
 
 const state = {
   settings: { project: '', recent: [] },
-  modelConfigs: [], // settings.models: one entry per configured provider/model
-  activeModelId: '', // which of them chat/completion run on
+  modelConfigs: [], // settings.models: the settings dialog's edit buffer
+  activeModelId: '', // which of them the settings dialog is editing
+  chatModels: [], // settings.models as the chat picker sees them (no edit buffer)
+  chatModelId: '', // the model chat/completion actually run on
   info: null, // readProjectInfo() result: projectDir, device, declaredSources, hexPath…
   sources: null, // { declared, onDisk, orphans, headers }
   hex: null, // { exists, path, bytes, mtime, enabled }
@@ -441,6 +443,137 @@ function renderAiChip(ai) {
       ? `${ai.model || '(未设模型)'} @ ${ai.baseURL}${ai.apiKeySet ? ' 🔑' : ' (无密钥)'}`
       : '本机 DSH headless'
   chip.title = ai.mode === 'openai' ? 'OpenAI 兼容接口' : 'dsh --profile headless（一次性）'
+}
+
+/* ---------- chat-side model + reasoning picker ---------- */
+
+/** How the four catalogue ids read in the UI. */
+const EFFORT_TEXT = { off: '默认', low: 'Low', high: 'High', max: 'Max' }
+
+/** The model the chat footer button currently points at. */
+function chatModelEntry() {
+  const list = state.chatModels ?? []
+  return list.find((entry) => entry.id === state.chatModelId) ?? list[0]
+}
+
+/** The footer chip: active model + reasoning level, like the harness's own picker. */
+function renderChatModelChip() {
+  const button = $('btn-model-picker')
+  if (!button) return
+  const entry = chatModelEntry()
+  button.textContent = entry
+    ? `${entry.label || entry.model || '未命名模型'} · ${EFFORT_TEXT[entry.reasoningEffort] ?? '默认'}`
+    : '模型'
+  button.title = entry
+    ? [entry.baseURL, entry.model, entry.contextWindow ? `上下文 ${entry.contextWindow}` : '', '点击切换模型与推理等级'].filter(Boolean).join('\n')
+    : '在设置 → AI 后端里添加模型'
+}
+
+function closeChatModelMenu() {
+  $('model-menu').classList.add('hidden')
+}
+
+function modelMenuGroup(text) {
+  const group = document.createElement('div')
+  group.className = 'group'
+  group.textContent = text
+  return group
+}
+
+function modelMenuItem({ text, meta, active, onPick }) {
+  const item = document.createElement('div')
+  item.className = `item${active ? ' on' : ''}`
+  const label = document.createElement('span')
+  label.textContent = `${active ? '✓ ' : ''}${text}`
+  item.appendChild(label)
+  if (meta) {
+    const side = document.createElement('span')
+    side.className = 'meta'
+    side.textContent = meta
+    item.appendChild(side)
+  }
+  item.onclick = (event) => {
+    event.stopPropagation()
+    onPick()
+  }
+  return item
+}
+
+/** Build and place the popover ABOVE the button (flip down when there is no room). */
+function openChatModelMenu() {
+  const menu = $('model-menu')
+  const button = $('btn-model-picker')
+  const entry = chatModelEntry()
+  menu.textContent = ''
+  menu.appendChild(modelMenuGroup('模型'))
+  if (!(state.chatModels ?? []).length) menu.appendChild(modelMenuGroup('（还没有模型：设置 → AI 后端 → 添加）'))
+  for (const model of state.chatModels ?? []) {
+    menu.appendChild(
+      modelMenuItem({
+        text: model.label || model.model || '未命名模型',
+        meta: model.label ? model.model : '',
+        active: model.id === state.chatModelId,
+        onPick: () => pickChatModel(model.id),
+      }),
+    )
+  }
+  menu.appendChild(modelMenuGroup('推理等级'))
+  for (const effort of ['off', 'low', 'high', 'max']) {
+    menu.appendChild(
+      modelMenuItem({
+        text: EFFORT_TEXT[effort],
+        meta: effort === 'off' ? '不发送' : effort === 'max' ? '按 high 发送' : '',
+        active: (entry?.reasoningEffort ?? 'off') === effort,
+        onPick: () => pickChatEffort(effort),
+      }),
+    )
+  }
+  menu.classList.remove('hidden')
+  const rect = button.getBoundingClientRect()
+  const height = menu.offsetHeight
+  const top = rect.top - height - 6 >= 8 ? rect.top - height - 6 : rect.bottom + 6
+  menu.style.left = `${Math.max(8, Math.min(rect.right - menu.offsetWidth, window.innerWidth - menu.offsetWidth - 8))}px`
+  menu.style.top = `${top}px`
+}
+
+/** Apply a `/api/models/select` answer to every surface that shows the model. */
+function applyChatModelState(data) {
+  if (data.models) {
+    state.chatModels = data.models
+    state.settings.models = data.models
+  }
+  if (data.activeModelId) {
+    state.chatModelId = data.activeModelId
+    state.settings.activeModelId = data.activeModelId
+  }
+  if (data.ai) {
+    state.ai = data.ai
+    renderAiChip(data.ai)
+  }
+  renderChatModelChip()
+}
+
+async function pickChatModel(id) {
+  const data = await post('/api/models/select', { id }).catch((error) => ({ error: error.message }))
+  if (data.error) {
+    appendMessage('err', '切换模型', data.error)
+    return
+  }
+  applyChatModelState(data)
+  closeChatModelMenu()
+  appendMessage('ai', '已切换模型', (data.models ?? []).find((entry) => entry.id === id)?.model ?? id)
+}
+
+async function pickChatEffort(effort) {
+  const entry = chatModelEntry()
+  if (!entry) return
+  const data = await post('/api/models/select', { id: entry.id, reasoningEffort: effort }).catch((error) => ({ error: error.message }))
+  if (data.error) {
+    appendMessage('err', '切换推理等级', data.error)
+    return
+  }
+  applyChatModelState(data)
+  closeChatModelMenu()
 }
 
 /* ---------- project + file operations ---------- */
@@ -1435,6 +1568,9 @@ async function saveSettings() {
   state.activeModelId = saved.activeModelId ?? state.activeModelId
   renderModelList()
   loadModelEntry(state.modelConfigs.find((entry) => entry.id === state.activeModelId) ?? state.modelConfigs[0])
+  state.chatModels = saved.models ?? state.chatModels
+  state.chatModelId = saved.activeModelId ?? state.chatModelId
+  renderChatModelChip()
   applyEditorSettings()
   renderAiChip(saved.ai)
   renderInlineChip()
@@ -2832,8 +2968,11 @@ async function boot() {
   const settings = await api('/api/settings')
   state.settings = settings
   state.ai = settings.ai
+  state.chatModels = settings.models ?? []
+  state.chatModelId = settings.activeModelId ?? ''
   applyEditorSettings()
   renderAiChip(settings.ai)
+  renderChatModelChip()
   renderInlineChip()
   const select = $('project')
   await refreshProjectSelect()
@@ -2849,6 +2988,22 @@ async function boot() {
   $('btn-build').onclick = () => build('build')
   $('btn-rebuild').onclick = () => build('rebuild')
   $('btn-send').onclick = send
+  $('btn-model-picker').onclick = (event) => {
+    event.stopPropagation()
+    if ($('model-menu').classList.contains('hidden')) openChatModelMenu()
+    else closeChatModelMenu()
+  }
+  // A fixed-position popover must not outlive the layout it was placed against.
+  document.addEventListener('click', (event) => {
+    const menu = $('model-menu')
+    if (menu.classList.contains('hidden')) return
+    if (menu.contains(event.target) || $('btn-model-picker').contains(event.target)) return
+    closeChatModelMenu()
+  })
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeChatModelMenu()
+  })
+  window.addEventListener('resize', closeChatModelMenu)
   $('skill').onchange = renderSkillHint
   // Preset prompts: re-read when the user reaches for the menu (the files are
   // external, so they may have been edited a second ago).

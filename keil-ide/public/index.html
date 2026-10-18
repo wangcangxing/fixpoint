@@ -103,6 +103,7 @@
           <label><input type="checkbox" id="ctx-file" checked /> 附带当前文件</label>
           <label><input type="checkbox" id="ctx-errors" checked /> 附带编译错误</label>
           <span class="spacer"></span>
+          <button id="btn-model-picker" class="tiny" title="切换模型与推理等级">模型</button>
           <button id="btn-send" class="primary">发送</button>
         </div>
         <button id="btn-apply" disabled>对比并应用 AI 修改…</button>
@@ -111,6 +112,9 @@
         </div>
       </aside>
     </main>
+
+    <!-- Chat model / reasoning picker; app.js positions it against its button. -->
+    <div id="model-menu" class="model-menu hidden"></div>
 
     <div class="splitter-h" id="split-problems" title="上下拖动调整问题面板高度（双击复位）"></div>
 

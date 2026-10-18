@@ -172,6 +172,30 @@ settings = await postSettings({
 })
 check('invalid active id falls back to the first', settings.activeModelId, 'a')
 
+// --- the chat-side picker endpoint (what the footer button calls) ---
+const selectModel = (body) =>
+  fetch(`${base}/api/models/select`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(async (response) => ({ status: response.status, ...(await response.json()) }))
+
+let picked = await selectModel({ id: 'nope' })
+check('select: unknown model is a 404', picked.status, 404)
+picked = await selectModel({ id: 'a', reasoningEffort: 'turbo' })
+check('select: unknown effort is a 400', picked.status, 400)
+
+settings = await postSettings({
+  models: catalogue({ contextWindow: 128000, maxOutputTokens: 123, reasoningEffort: 'low', thinking: true, supportsImages: true }),
+  activeModelId: 'mock',
+})
+picked = await selectModel({ id: 'default' })
+check('select: switches the active model', [picked.status, picked.activeModelId], [200, 'default'])
+picked = await selectModel({ id: 'mock', reasoningEffort: 'max' })
+check('select: updates that entry reasoning level', [picked.activeModelId, picked.models[1].reasoningEffort], ['mock', 'max'])
+picked = await selectModel({ id: 'mock', reasoningEffort: 'low' })
+check('select: level is changeable again', picked.models[1].reasoningEffort, 'low')
+
 settings = await postSettings({
   models: catalogue({ contextWindow: 128000, maxOutputTokens: 123, reasoningEffort: 'low', thinking: true, supportsImages: true }),
   activeModelId: 'mock',
@@ -252,7 +276,14 @@ const until = async (expression, timeoutMs = 15000) => {
   return false
 }
 
-check('page loaded', await until(`document.readyState === 'complete' && !!document.getElementById('btn-settings')`), true)
+// Wait for boot to have BOUND the button, not just for the element to exist: the
+// first click used to land before boot() finished wiring the dialog (a race that
+// only shows up on cold/slow starts).
+check(
+  'page loaded',
+  await until(`document.readyState === 'complete' && typeof document.getElementById('btn-settings').onclick === 'function'`),
+  true,
+)
 await evaluate(`(() => {
   document.getElementById('btn-settings').click()
   document.querySelector('.settings-tabs .tab[data-tab="ai"]').click()
@@ -360,6 +391,70 @@ check('deleted model is gone', after.models.map((entry) => entry.label), ['默�
 // Deleting the third entry selects its neighbour (the previous one), which is what
 // the dialog then shows — "default" would have been a different, surprising jump.
 check('active falls back to the neighbouring entry', after.activeModelId, 'mock')
+
+/* ---------- D. chat footer picker (model + reasoning level) ---------- */
+
+await evaluate(`document.getElementById('btn-settings-close').click(); true`)
+check('footer chip shows model + level', await evaluate(`document.getElementById('btn-model-picker').textContent`), 'Mock · Low')
+
+const menu = await evaluate(`(() => {
+  document.getElementById('btn-model-picker').click()
+  const menu = document.getElementById('model-menu')
+  const nodes = [...menu.children]
+  const first = nodes.findIndex((node) => node.classList.contains('group'))
+  const second = nodes.findIndex((node, index) => index > first && node.classList.contains('group'))
+  const text = (node) => node.firstElementChild.textContent.replace('✓', '').trim()
+  const rect = menu.getBoundingClientRect()
+  const hit = document.elementFromPoint(Math.round(rect.left + rect.width / 2), Math.round(rect.top + Math.min(rect.height / 2, 20)))
+  return {
+    groups: nodes.filter((node) => node.classList.contains('group')).map((node) => node.textContent),
+    models: nodes.slice(first + 1, second).map(text),
+    efforts: nodes.slice(second + 1).map(text),
+    onScreen: rect.top >= 0 && rect.bottom <= window.innerHeight && rect.left >= 0 && rect.right <= window.innerWidth,
+    hitInside: !!hit && !!hit.closest('#model-menu'),
+  }
+})()`)
+check('picker has both sections', menu.groups, ['模型', '推理等级'])
+check('picker lists every model', menu.models, ['默认（死的）', 'Mock'])
+check('picker lists every level', menu.efforts, ['默认', 'Low', 'High', 'Max'])
+check('picker is on screen', menu.onScreen, true)
+check('picker is not clipped', menu.hitInside, true)
+
+await evaluate(`(() => {
+  const item = [...document.querySelectorAll('#model-menu .item')].find((node) => node.textContent.includes('默认（死的）'))
+  item.click()
+  return true
+})()`)
+check('picking a model updates the chip', await until(`document.getElementById('btn-model-picker').textContent.includes('默认（死的）')`), true)
+let live = await getSettings()
+check('picking a model persists', live.activeModelId, 'default')
+
+await evaluate(`(() => {
+  document.getElementById('btn-model-picker').click()
+  const item = [...document.querySelectorAll('#model-menu .item')].find((node) => node.textContent.includes('High'))
+  item.click()
+  return true
+})()`)
+check('picking a level updates the chip', await until(`/High/.test(document.getElementById('btn-model-picker').textContent)`), true)
+live = await getSettings()
+check('picking a level persists on that entry', live.models[0].reasoningEffort, 'high')
+check('picking a level keeps the active model', live.activeModelId, 'default')
+
+const escape = await evaluate(`(() => {
+  document.getElementById('btn-model-picker').click()
+  const opened = !document.getElementById('model-menu').classList.contains('hidden')
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  return { opened, closed: document.getElementById('model-menu').classList.contains('hidden') }
+})()`)
+check('Escape closes the picker', escape, { opened: true, closed: true })
+
+await evaluate(`document.getElementById('btn-model-picker').click(); true`)
+const pickerShot = await send('Page.captureScreenshot', { format: 'png' })
+if (pickerShot?.data) {
+  await writeFile('verify/screenshot-model-picker.png', Buffer.from(pickerShot.data, 'base64'))
+  console.log('      screenshot: verify/screenshot-model-picker.png')
+}
+await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`)
 
 await rm(profile, { recursive: true, force: true }).catch(() => undefined)
 console.log(failed ? `\n${failed} check(s) failed` : '\nall checks passed')

@@ -2017,6 +2017,24 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { ...result, mode: merged.mode })
   }
 
+  if (url.pathname === '/api/models/select' && req.method === 'POST') {
+    // Chat-side picker: switch the active model and/or its reasoning level without
+    // round-tripping the whole list from the browser (keys stay server-side).
+    const body = await readBody(req)
+    const id = String(body.id ?? '').trim()
+    const list = modelEntries(settings)
+    if (!list.some((entry) => entry.id === id)) {
+      return sendJson(res, 404, { error: `没有这个模型: ${id || '(空)'}` })
+    }
+    const effort = body.reasoningEffort
+    if (effort !== undefined && !MODEL_EFFORTS.has(effort)) {
+      return sendJson(res, 400, { error: `推理等级只能是 off / low / high / max，收到 ${JSON.stringify(effort)}` })
+    }
+    const next = list.map((entry) => (entry.id === id && effort !== undefined ? { ...entry, reasoningEffort: effort } : entry))
+    const saved = await saveSettings({ models: next, activeModelId: id })
+    return sendJson(res, 200, { ok: true, ...redactSettings(saved) })
+  }
+
   if (url.pathname === '/api/ai/test') {
     // The dialog may test UNSAVED credentials, so the request's `ai` patch must win
     // over the saved settings — exactly like /api/models. Ignoring it here made
