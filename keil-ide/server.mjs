@@ -417,14 +417,98 @@ async function listSkills(projectDir, skillConfig = {}) {
   })
 }
 
-/** Effective AI config (environment overrides win over settings.json). */function effectiveAi(settings) {
+/** How many model entries the settings dialog may keep (it is a dropdown, not a DB). */
+const MAX_MODELS = 20
+
+/**
+ * The configured model entries.
+ *
+ * `models` is the multi-model shape: one entry per provider/model, each carrying
+ * its own connection (mode / baseURL / model / apiKey). Settings files written
+ * before this feature have only the single `ai` config, so it is exposed as one
+ * synthetic entry with id `default` — nothing has to be rewritten on disk just
+ * to open the dialog, and the first save persists the list for real.
+ */
+function modelEntries(settings) {
+  const list = (Array.isArray(settings.models) ? settings.models : []).filter((entry) => entry && typeof entry === 'object')
+  if (list.length) return list
   const ai = settings.ai ?? {}
+  return [
+    {
+      id: 'default',
+      label: '',
+      mode: ai.mode ?? 'openai',
+      baseURL: ai.baseURL ?? '',
+      model: ai.model ?? '',
+      apiKey: ai.apiKey ?? '',
+    },
+  ]
+}
+
+/** The entry chat and completion run on. */
+function activeModel(settings) {
+  const list = modelEntries(settings)
+  const wanted = String(settings.activeModelId ?? '')
+  return list.find((entry) => entry.id === wanted) ?? list[0]
+}
+
+/**
+ * Validate a submitted model list.
+ *
+ * An omitted or blank key keeps the stored one: the browser never receives keys
+ * (they are redacted on read), so it cannot echo them back. Ids are de-duplicated
+ * because the page generates them, and the list is capped by MAX_MODELS.
+ */
+function cleanModels(submitted, current) {
+  const byId = new Map(current.map((entry) => [entry.id, entry]))
+  const seen = new Set()
+  const list = []
+  for (const raw of submitted) {
+    if (list.length >= MAX_MODELS) break
+    if (!raw || typeof raw !== 'object') continue
+    const id = String(raw.id ?? '').trim().slice(0, 64)
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    const previous = byId.get(id) ?? {}
+    const typed = typeof raw.apiKey === 'string' ? raw.apiKey.trim() : ''
+    list.push({
+      id,
+      label: String(raw.label ?? '').trim().slice(0, 80),
+      mode: raw.mode === 'dsh' ? 'dsh' : 'openai',
+      baseURL: String(raw.baseURL ?? '').trim().slice(0, 300),
+      model: String(raw.model ?? '').trim().slice(0, 200),
+      // A blank key means "leave the stored one alone", exactly like `ai.apiKey`.
+      apiKey: typed || String(previous.apiKey ?? ''),
+    })
+  }
+  return list
+}
+
+/**
+ * Effective AI config (environment overrides win over settings.json).
+ *
+ * The ACTIVE model entry owns the connection; temperature / maxTokens / stream
+ * and the inline-completion role stay global (one answer style, one tab model).
+ * `aiPatch` is the dialog's unsaved edit and wins over the stored entry, which is
+ * what makes "获取模型列表" and "测试连接" work before the user presses save.
+ */
+function effectiveAi(settings, aiPatch = {}) {
+  const ai = settings.ai ?? {}
+  const active = activeModel(settings) ?? {}
+  const merged = {
+    ...ai,
+    mode: active.mode ?? ai.mode,
+    baseURL: active.baseURL ?? ai.baseURL,
+    model: active.model ?? ai.model,
+    apiKey: active.apiKey ?? ai.apiKey,
+    ...aiPatch,
+  }
   const inline = ai.inline ?? {}
   return {
-    mode: process.env.KEIL_IDE_AI_MODE ?? ai.mode ?? 'openai',
-    baseURL: String(process.env.KEIL_IDE_AI_BASEURL ?? ai.baseURL ?? 'https://api.deepseek.com/v1').replace(/\/+$/, ''),
-    model: String(process.env.KEIL_IDE_AI_MODEL ?? ai.model ?? 'deepseek-chat'),
-    apiKey: String(process.env.KEIL_IDE_AI_KEY ?? ai.apiKey ?? ''),
+    mode: process.env.KEIL_IDE_AI_MODE ?? merged.mode ?? 'openai',
+    baseURL: String(process.env.KEIL_IDE_AI_BASEURL ?? merged.baseURL ?? 'https://api.deepseek.com/v1').replace(/\/+$/, ''),
+    model: String(process.env.KEIL_IDE_AI_MODEL ?? merged.model ?? 'deepseek-chat'),
+    apiKey: String(process.env.KEIL_IDE_AI_KEY ?? merged.apiKey ?? ''),
     temperature: typeof ai.temperature === 'number' ? ai.temperature : 0.2,
     maxTokens: Number.isInteger(ai.maxTokens) ? ai.maxTokens : 2048,
     stream: ai.stream !== false,
@@ -455,6 +539,18 @@ function redactSettings(settings) {
   const ai = effectiveAi(settings)
   return {
     ...settings,
+    // `...settings` would spread the raw list (keys included), so it is replaced.
+    // EVERY entry may hold its own key: redact all of them, not just the active one.
+    models: modelEntries(settings).map((entry) => ({
+      id: entry.id,
+      label: entry.label ?? '',
+      mode: entry.mode ?? 'openai',
+      baseURL: entry.baseURL ?? '',
+      model: entry.model ?? '',
+      apiKeySet: Boolean(entry.apiKey),
+      apiKeyHint: entry.apiKey ? `****${entry.apiKey.slice(-4)}` : '',
+    })),
+    activeModelId: activeModel(settings).id,
     ai: {
       mode: ai.mode,
       baseURL: ai.baseURL,
@@ -1105,23 +1201,46 @@ async function handleApi(req, res, url) {
   const settings = await loadSettings()
 
   if (url.pathname === '/api/health') {
-    return sendJson(res, 200, { ok: true, pid: process.pid, port: PORT, settings })
+    // Redacted: this endpoint is reachable by any local page, and the model list
+    // now carries one key per entry.
+    return sendJson(res, 200, { ok: true, pid: process.pid, port: PORT, settings: redactSettings(settings) })
   }
 
   if (url.pathname === '/api/settings') {
     if (req.method === 'POST') {
       const patch = await readBody(req)
+      let clearKeys = false
       if (patch.ai && typeof patch.ai === 'object') {
         const aiPatch = { ...patch.ai }
         if (aiPatch.clearApiKey) {
-          // "清除密钥" clears BOTH roles: the chat key and the optional completion key.
+          // "清除密钥" clears EVERY role: the chat key, the completion key, and the
+          // key of every configured model.
           aiPatch.apiKey = ''
           aiPatch.inline = { ...(aiPatch.inline ?? {}), apiKey: '' }
           delete aiPatch.clearApiKey
+          clearKeys = true
         } else if (typeof aiPatch.apiKey === 'string' && aiPatch.apiKey.trim() === '') {
           delete aiPatch.apiKey // an empty string means "leave the stored key alone"
         }
         patch.ai = aiPatch
+      }
+      // Multi-model list: sanitize before it reaches disk. Deleting every entry is
+      // refused (the legacy `ai` config would silently take over again).
+      if (Array.isArray(patch.models)) {
+        const cleaned = cleanModels(patch.models, modelEntries(settings))
+        if (cleaned.length) {
+          patch.models = cleaned
+          if (!cleaned.some((entry) => entry.id === patch.activeModelId)) patch.activeModelId = cleaned[0].id
+        } else {
+          delete patch.models
+          delete patch.activeModelId
+        }
+      }
+      // Explicit clearing must run AFTER the "blank key keeps the stored one" rule,
+      // otherwise sanitizing would put the old keys straight back.
+      if (clearKeys) {
+        patch.models = (patch.models ?? modelEntries(settings)).map((entry) => ({ ...entry, apiKey: '' }))
+        if (!patch.activeModelId) patch.activeModelId = settings.activeModelId
       }
       return sendJson(res, 200, redactSettings(await saveSettings(patch)))
     }
@@ -1843,7 +1962,7 @@ async function handleApi(req, res, url) {
     // (environment overrides still win over both, as everywhere else).
     const body = req.method === 'POST' ? await readBody(req) : {}
     const patch = body.ai && typeof body.ai === 'object' ? body.ai : {}
-    const merged = effectiveAi({ ...settings, ai: { ...(settings.ai ?? {}), ...patch } })
+    const merged = effectiveAi(settings, patch)
     const result = await listModels(
       { baseURL: String(merged.baseURL ?? '').replace(/\/+$/, ''), apiKey: merged.apiKey, model: merged.model },
       { useCache: body.refresh !== true },
@@ -1858,7 +1977,7 @@ async function handleApi(req, res, url) {
     // only the latter saw the key the user had just typed.
     const body = req.method === 'POST' ? await readBody(req) : {}
     const patch = body.ai && typeof body.ai === 'object' ? body.ai : {}
-    const ai = effectiveAi({ ...settings, ai: { ...(settings.ai ?? {}), ...patch } })
+    const ai = effectiveAi(settings, patch)
     if (ai.mode !== 'openai') {
       return sendJson(res, 200, { ok: false, mode: ai.mode, error: `当前 ai.mode=${ai.mode}，不是 openai` })
     }

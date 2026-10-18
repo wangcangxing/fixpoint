@@ -203,6 +203,16 @@
           <div class="settings-panes">
             <section class="pane-tab active" data-pane="ai">
         <label class="field">
+          <span>已添加模型</span>
+          <select id="ai-model-list"></select>
+          <button id="btn-model-add">添加</button>
+          <button id="btn-model-delete">删除</button>
+        </label>
+        <label class="field">
+          <span>名称</span>
+          <input type="text" id="ai-label" placeholder="给这个模型起个名，例如 DeepSeek 官方 / 本地 Ollama" />
+        </label>
+        <label class="field">
           <span>后端类型</span>
           <select id="ai-mode">
             <option value="openai">OpenAI 兼容接口</option>

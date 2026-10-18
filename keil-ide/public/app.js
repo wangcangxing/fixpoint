@@ -10,6 +10,8 @@
 
 const state = {
   settings: { project: '', recent: [] },
+  modelConfigs: [], // settings.models: one entry per configured provider/model
+  activeModelId: '', // which of them chat/completion run on
   info: null, // readProjectInfo() result: projectDir, device, declaredSources, hexPath…
   sources: null, // { declared, onDisk, orphans, headers }
   hex: null, // { exists, path, bytes, mtime, enabled }
@@ -1214,22 +1216,62 @@ async function fetchModels({ silent = false } = {}) {
   }
 }
 
+/** Read the model-edit fields into the selected entry (before switching or saving). */
+function flushModelEntry() {
+  const entry = state.modelConfigs.find((item) => item.id === state.activeModelId)
+  if (!entry) return
+  entry.label = $('ai-label').value.trim()
+  entry.mode = $('ai-mode').value === 'dsh' ? 'dsh' : 'openai'
+  entry.baseURL = $('ai-baseurl').value.trim()
+  entry.model = $('ai-model').value.trim()
+  const typed = $('ai-key').value.trim()
+  if (typed) entry.apiKey = typed
+}
+
+/** Fill the edit fields from one model entry. */
+function loadModelEntry(entry) {
+  if (!entry) return
+  state.activeModelId = entry.id
+  $('ai-label').value = entry.label ?? ''
+  $('ai-mode').value = entry.mode === 'dsh' ? 'dsh' : 'openai'
+  $('ai-baseurl').value = entry.baseURL ?? ''
+  $('ai-model').value = entry.model ?? ''
+  const key = $('ai-key')
+  key.value = entry.apiKey ?? ''
+  key.placeholder = entry.apiKey
+    ? '刚输入、还没保存（点"保存全部设置"生效）'
+    : entry.apiKeySet
+      ? `已保存 ${entry.apiKeyHint}（留空表示不修改）`
+      : '粘贴 API Key（本地端点可留空）'
+}
+
+/** Rebuild the "已添加模型" dropdown. */
+function renderModelList() {
+  const list = $('ai-model-list')
+  list.textContent = ''
+  for (const entry of state.modelConfigs) {
+    const option = document.createElement('option')
+    option.value = entry.id
+    option.textContent = entry.label || entry.model || entry.baseURL || '（未命名模型）'
+    option.title = [entry.mode === 'dsh' ? '本机 DSH headless' : entry.baseURL, entry.model].filter(Boolean).join(' · ')
+    list.appendChild(option)
+  }
+  list.value = state.activeModelId
+  $('btn-model-delete').disabled = state.modelConfigs.length <= 1
+}
+
 async function openSettings() {
   const settings = await api('/api/settings')
   state.settings = { ...state.settings, ...settings }
   state.ai = settings.ai
 
-  // --- AI 后端 ---
-  $('ai-mode').value = settings.ai.mode
-  $('ai-baseurl').value = settings.ai.baseURL
-  $('ai-model').value = settings.ai.model
+  // --- AI 后端：模型列表 + 当前选中的模型 ---
+  state.modelConfigs = (settings.models ?? []).map((entry) => ({ ...entry }))
+  state.activeModelId = settings.activeModelId || state.modelConfigs[0]?.id || 'default'
+  renderModelList()
+  loadModelEntry(state.modelConfigs.find((entry) => entry.id === state.activeModelId) ?? state.modelConfigs[0])
   $('ai-temp').value = settings.ai.temperature
   $('ai-max-tokens').value = settings.ai.maxTokens ?? 4096
-  const key = $('ai-key')
-  key.value = ''
-  key.placeholder = settings.ai.apiKeySet
-    ? `已保存 ${settings.ai.apiKeyHint}（留空表示不修改）`
-    : '粘贴 API Key（本地端点可留空）'
 
   // --- 代码补全 ---
   const inline = settings.ai.inline ?? {}
@@ -1291,6 +1333,7 @@ async function openSettings() {
 
 /** Every settings field as one patch (keys only when the user typed one). */
 function formSettingsPatch() {
+  flushModelEntry()
   const ai = {
     mode: $('ai-mode').value,
     baseURL: $('ai-baseurl').value.trim(),
@@ -1316,6 +1359,17 @@ function formSettingsPatch() {
   if (key) ai.apiKey = key
   return {
     ai,
+    // The whole list, not just the active entry: the dialog edits several models
+    // and one save should persist them all.
+    models: state.modelConfigs.map((entry) => ({
+      id: entry.id,
+      label: entry.label ?? '',
+      mode: entry.mode,
+      baseURL: entry.baseURL,
+      model: entry.model,
+      ...(entry.apiKey ? { apiKey: entry.apiKey } : {}),
+    })),
+    activeModelId: state.activeModelId,
     editor: {
       fontSize: Number($('editor-fontsize').value) || 13,
       wordWrap: $('editor-wordwrap').checked ? 'on' : 'off',
@@ -1348,6 +1402,12 @@ async function saveSettings() {
   const saved = await post('/api/settings', formSettingsPatch())
   state.settings = { ...state.settings, ...saved }
   state.ai = saved.ai
+  // The server redacts keys, so rebuild the list from what it returned: the typed
+  // key leaves this page's memory and the placeholder becomes "已保存 ****abcd".
+  state.modelConfigs = (saved.models ?? []).map((entry) => ({ ...entry }))
+  state.activeModelId = saved.activeModelId ?? state.activeModelId
+  renderModelList()
+  loadModelEntry(state.modelConfigs.find((entry) => entry.id === state.activeModelId) ?? state.modelConfigs[0])
   applyEditorSettings()
   renderAiChip(saved.ai)
   renderInlineChip()
@@ -1378,8 +1438,11 @@ async function testAi() {
 async function clearAiKey() {
   const saved = await post('/api/settings', { ai: { clearApiKey: true } })
   state.ai = saved.ai
+  state.modelConfigs = (saved.models ?? []).map((entry) => ({ ...entry }))
+  renderModelList()
+  loadModelEntry(state.modelConfigs.find((entry) => entry.id === state.activeModelId) ?? state.modelConfigs[0])
   renderAiChip(saved.ai)
-  $('settings-status').textContent = '已清除两个角色的密钥'
+  $('settings-status').textContent = '已清除所有模型的密钥（含补全角色）'
 }
 
 /* ---------- C51 symbol intelligence: completion / hover / signature / F12 ---------- */
@@ -2881,6 +2944,36 @@ async function boot() {
   $('btn-settings-close').onclick = () => $('settings').classList.add('hidden')
   $('btn-ai-test').onclick = testAi
   $('btn-ai-clear').onclick = clearAiKey
+  // Multi-model list: switch between entries, add a new one, delete the current one.
+  $('ai-model-list').onchange = () => {
+    flushModelEntry()
+    loadModelEntry(state.modelConfigs.find((entry) => entry.id === $('ai-model-list').value))
+  }
+  $('btn-model-add').onclick = () => {
+    flushModelEntry()
+    const entry = {
+      id: `m-${Date.now().toString(36)}`,
+      label: '',
+      mode: 'openai',
+      baseURL: '',
+      model: '',
+      apiKey: '',
+      apiKeySet: false,
+    }
+    state.modelConfigs.push(entry)
+    loadModelEntry(entry)
+    renderModelList()
+    $('settings-status').textContent = '已添加一个模型：填好名称、Base URL、模型名和 Key 后点"保存全部设置"'
+  }
+  $('btn-model-delete').onclick = () => {
+    if (state.modelConfigs.length <= 1) return
+    const index = state.modelConfigs.findIndex((entry) => entry.id === state.activeModelId)
+    if (index < 0) return
+    const [removed] = state.modelConfigs.splice(index, 1)
+    loadModelEntry(state.modelConfigs[Math.max(0, index - 1)])
+    renderModelList()
+    $('settings-status').textContent = `已删除 ${removed.label || removed.model || '这个模型'}（点"保存全部设置"生效）`
+  }
   $('btn-fetch-models').onclick = () => fetchModels()
   // The dropdown only helps pick a name; the text field stays the source of truth.
   $('ai-model-select').onchange = () => {

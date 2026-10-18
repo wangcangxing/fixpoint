@@ -1,21 +1,189 @@
 #!/usr/bin/env node
 /**
- * Checks the settings dialog's model picker: pressing 获取模型列表 must fill the
- * datalist from the endpoint's `GET /models` (DeepSeek's 列出模型 endpoint).
+ * Multi-model ("添加模型") acceptance:
  *
- * Usage: node verify/models-ui.mjs [cdpPort]
+ *   A. server — a settings file that only has the old single `ai` config shows up
+ *      as ONE entry (`default`); a submitted list round-trips; keys are redacted on
+ *      read, kept when omitted, and wiped by "清除密钥"; a bogus active id falls back.
+ *   B. routing — the ACTIVE entry decides the connection: the probe hits the mock
+ *      when it is active and fails when the dead entry is, and a real chat carries
+ *      the active entry's model name (checked against the mock's /last-request).
+ *   C. UI (headless Chrome) — add / switch / delete a model, save, verify the list
+ *      and fields follow, "获取模型列表" still fills the catalog, and "测试连接"
+ *      works with the picked entry.
+ *
+ * Usage: node verify/models-ui.mjs [serverPort] [chromePort] [mockPort]
+ *   (expects an IDE server started with KEIL_IDE_PORT=<serverPort>; default 4896)
  */
-const port = process.argv[2] ?? '9222'
-const targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json()
-const page = targets.find((target) => target.type === 'page')
-if (!page) {
-  console.error('no page target')
-  process.exit(1)
+import { spawn } from 'node:child_process'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+
+const serverPort = process.argv[2] ?? '4896'
+const chromePort = process.argv[3] ?? '9335'
+const mockPort = process.argv[4] ?? '4905'
+const base = `http://127.0.0.1:${serverPort}`
+const mockBase = `http://127.0.0.1:${mockPort}/v1`
+const DEAD = 'http://127.0.0.1:9/v1'
+
+let failed = 0
+const check = (name, actual, expected) => {
+  const ok = JSON.stringify(actual) === JSON.stringify(expected)
+  if (!ok) failed += 1
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : `\n      got      ${JSON.stringify(actual)}\n      expected ${JSON.stringify(expected)}`}`)
 }
-const socket = new WebSocket(page.webSocketDebuggerUrl)
+
+const waitFor = async (url, timeoutMs = 20000) => {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const response = await fetch(url).catch(() => undefined)
+    if (response?.ok) return true
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+  return false
+}
+
+const here = new URL('.', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
+const mock = spawn(process.execPath, [join(here, 'mock-openai.mjs'), String(mockPort)], { stdio: 'ignore', windowsHide: true })
+process.on('exit', () => mock.kill())
+
+if (!(await waitFor(`${base}/api/health`))) {
+  console.error(`no IDE server on ${base} — start one with KEIL_IDE_PORT=${serverPort}`)
+  process.exit(2)
+}
+if (!(await waitFor(`http://127.0.0.1:${mockPort}/v1/models`))) {
+  console.error('mock OpenAI server did not start')
+  process.exit(2)
+}
+
+const getSettings = () => fetch(`${base}/api/settings`).then((response) => response.json())
+const postSettings = (body) =>
+  fetch(`${base}/api/settings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then((response) => response.json())
+const probeModels = () =>
+  fetch(`${base}/api/models`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ai: {}, refresh: true }),
+  }).then((response) => response.json())
+const sendChat = () =>
+  fetch(`${base}/api/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ prompt: '用一句话打个招呼', project: '', skill: '' }),
+  }).then(async (response) => {
+    await response.text() // drain the SSE stream so the mock has finished
+    return fetch(`http://127.0.0.1:${mockPort}/last-request`).then((r) => r.json())
+  })
+
+/* ---------- A. server rules ---------- */
+
+let settings = await getSettings()
+check('legacy single config becomes one entry', [settings.models?.length, settings.models?.[0]?.id], [1, 'default'])
+check('read redacts the key', ['apiKey' in (settings.models?.[0] ?? {}), settings.models?.[0]?.apiKeySet], [false, false])
+
+settings = await postSettings({
+  models: [
+    { id: 'default', label: '默认（死的）', mode: 'openai', baseURL: DEAD, model: 'dead-model' },
+    { id: 'mock', label: 'Mock', mode: 'openai', baseURL: mockBase, model: 'mock-model', apiKey: 'sk-test-1234' },
+  ],
+  activeModelId: 'mock',
+})
+check('two entries saved', settings.models.map((entry) => entry.id), ['default', 'mock'])
+check('active entry saved', settings.activeModelId, 'mock')
+check('key redacted, hint kept', [settings.models[1].apiKeySet, settings.models[1].apiKeyHint, 'apiKey' in settings.models[1]], [true, '****1234', false])
+
+const settingsFile = (await getSettings()).paths.settingsFile
+const onDisk = JSON.parse(await readFile(settingsFile, 'utf8'))
+check('key really persisted to disk', onDisk.models.find((entry) => entry.id === 'mock')?.apiKey, 'sk-test-1234')
+
+settings = await postSettings({ models: settings.models, activeModelId: 'mock' })
+check('omitted key is kept (not wiped)', settings.models[1].apiKeySet, true)
+
+const probeActive = await probeModels()
+check('probe uses the ACTIVE entry (mock)', [probeActive.ok, probeActive.models?.includes('mock-c51-model')], [true, true])
+
+const chat = await sendChat()
+check('chat carries the active entry model', chat.model, 'mock-model')
+check('chat used the active entry base URL (mock got the request)', chat.messages?.length > 0, true)
+
+await postSettings({ activeModelId: 'default' })
+const probeDead = await probeModels()
+check('switching the active entry really switches the endpoint', probeDead.ok, false)
+await postSettings({ activeModelId: 'mock' })
+
+settings = await postSettings({ ai: { clearApiKey: true } })
+check('clear wipes every model key', settings.models.map((entry) => entry.apiKeySet), [false, false])
+
+settings = await postSettings({
+  models: [
+    { id: 'a', label: 'A', mode: 'openai', baseURL: mockBase, model: 'mock-c51-model' },
+    { id: 'b', label: 'B', mode: 'openai', baseURL: mockBase, model: 'mock-c51-mini' },
+  ],
+  activeModelId: 'nope',
+})
+check('invalid active id falls back to the first', settings.activeModelId, 'a')
+
+settings = await postSettings({
+  models: [
+    { id: 'default', label: '默认（死的）', mode: 'openai', baseURL: DEAD, model: 'dead-model' },
+    { id: 'mock', label: 'Mock', mode: 'openai', baseURL: mockBase, model: 'mock-model', apiKey: 'sk-test-1234' },
+  ],
+  activeModelId: 'mock',
+})
+
+/* ---------- C. UI ---------- */
+
+const chromeCandidates = [
+  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+]
+const { existsSync } = await import('node:fs')
+const chrome = chromeCandidates.find((path) => existsSync(path))
+if (!chrome) {
+  console.error('no Chrome/Edge found')
+  process.exit(2)
+}
+
+const profile = join(tmpdir(), `dsh-chrome-models-${chromePort}`)
+await rm(profile, { recursive: true, force: true }).catch(() => undefined)
+await mkdir(profile, { recursive: true })
+const browser = spawn(
+  chrome,
+  [
+    '--headless=new',
+    '--disable-gpu',
+    '--no-first-run',
+    '--no-default-browser-check',
+    `--remote-debugging-port=${chromePort}`,
+    `--user-data-dir=${profile}`,
+    '--window-size=1280,900',
+    base,
+  ],
+  { stdio: 'ignore', windowsHide: true },
+)
+process.on('exit', () => browser.kill())
+
+let target
+for (let attempt = 0; attempt < 60; attempt += 1) {
+  const targets = await fetch(`http://127.0.0.1:${chromePort}/json`).then((response) => response.json()).catch(() => [])
+  target = targets.find((entry) => entry.type === 'page')
+  if (target) break
+  await new Promise((resolve) => setTimeout(resolve, 250))
+}
+if (!target) {
+  console.error('no page target from Chrome')
+  process.exit(2)
+}
+
+const socket = new WebSocket(target.webSocketDebuggerUrl)
 let nextId = 0
 const pending = new Map()
-const send = (method, params) =>
+const send = (method, params = {}) =>
   new Promise((resolve) => {
     const id = ++nextId
     pending.set(id, resolve)
@@ -29,40 +197,106 @@ socket.addEventListener('message', (event) => {
   }
 })
 await new Promise((resolve) => socket.addEventListener('open', resolve))
-const evaluate = async (expression, awaitPromise = true) => {
-  const result = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise })
-  if (result?.exceptionDetails) return { error: result.exceptionDetails.exception?.description ?? 'failed' }
-  return { value: result?.result?.value }
+const evaluate = async (expression) => {
+  const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true })
+  if (result?.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? JSON.stringify(result))
+  return result?.result?.value
+}
+const until = async (expression, timeoutMs = 15000) => {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await evaluate(expression).catch(() => false)) return true
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+  return false
 }
 
-await send('Page.reload', { ignoreCache: true })
-await new Promise((resolve) => setTimeout(resolve, 6000))
-
-const opened = await evaluate(`(async () => {
+check('page loaded', await until(`document.readyState === 'complete' && !!document.getElementById('btn-settings')`), true)
+await evaluate(`(() => {
   document.getElementById('btn-settings').click()
-  await new Promise((r) => setTimeout(r, 1200))
-  return JSON.stringify({ visible: !document.getElementById('settings').classList.contains('hidden') })
+  document.querySelector('.settings-tabs .tab[data-tab="ai"]').click()
+  return true
 })()`)
-console.log('打开设置:', opened.value ?? opened.error)
+check('settings dialog open', await until(`!document.getElementById('settings').classList.contains('hidden')`), true)
 
-const fetched = await evaluate(`(async () => {
-  document.getElementById('btn-fetch-models').click()
-  await new Promise((r) => setTimeout(r, 1500))
-  const input = document.getElementById('ai-model')
-  return JSON.stringify({
-    hint: document.getElementById('model-hint').textContent,
-    datalistAttr: input.getAttribute('list'),
-    options: [...document.querySelectorAll('#model-options option')].map((o) => o.value),
-    labels: [...document.querySelectorAll('#model-options option')].map((o) => o.label),
-  })
+const before = await evaluate(`(() => ({
+  options: [...document.querySelectorAll('#ai-model-list option')].map((option) => option.textContent),
+  active: document.getElementById('ai-model-list').value,
+  label: document.getElementById('ai-label').value,
+  baseURL: document.getElementById('ai-baseurl').value,
+  model: document.getElementById('ai-model').value,
+  keyPlaceholder: document.getElementById('ai-key').placeholder,
+}))()`)
+check('existing models listed', before.options, ['默认（死的）', 'Mock'])
+check('active model preselected', before.active, 'mock')
+check('fields show the active entry', [before.label, before.baseURL, before.model], ['Mock', mockBase, 'mock-model'])
+check('key placeholder says it is stored', /已保存 \*\*\*\*1234/.test(before.keyPlaceholder), true)
+
+await evaluate(`(() => {
+  document.getElementById('btn-model-add').click()
+  document.getElementById('ai-label').value = '本地测试'
+  document.getElementById('ai-baseurl').value = ${JSON.stringify(mockBase)}
+  document.getElementById('ai-model').value = 'ui-model'
+  document.getElementById('ai-key').value = 'sk-ui-5678'
+  document.getElementById('btn-settings-save').click()
+  return true
 })()`)
-console.log('获取模型列表:', fetched.value ?? fetched.error)
+check('save reported', await until(`/已保存到 settings.json/.test(document.getElementById('settings-status').textContent)`), true)
 
-const shot = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
+let after = await getSettings()
+check('new model persisted', after.models.map((entry) => entry.label), ['默认（死的）', 'Mock', '本地测试'])
+const newId = after.models[2].id
+check('new model is active', after.activeModelId, newId)
+check('new model key stored + redacted', [after.models[2].apiKeySet, after.models[2].apiKeyHint, 'apiKey' in after.models[2]], [true, '****5678', false])
+check('list reflects the save', await evaluate(`document.querySelectorAll('#ai-model-list option').length`), 3)
+
+// Switching entries must move the fields with it.
+const switched = await evaluate(`(() => {
+  const select = document.getElementById('ai-model-list')
+  select.value = 'default'
+  select.dispatchEvent(new Event('change', { bubbles: true }))
+  return { baseURL: document.getElementById('ai-baseurl').value, label: document.getElementById('ai-label').value }
+})()`)
+check('switching loads that entry', [switched.label, switched.baseURL], ['默认（死的）', DEAD])
+
+await evaluate(`(() => {
+  const select = document.getElementById('ai-model-list')
+  select.value = ${JSON.stringify(newId)}
+  select.dispatchEvent(new Event('change', { bubbles: true }))
+  document.getElementById('btn-ai-test').click()
+  return true
+})()`)
+check('test connection uses the picked entry', await until(`/连接成功/.test(document.getElementById('settings-status').textContent)`), true)
+
+await evaluate(`document.getElementById('btn-fetch-models').click(); true`)
+check('获取模型列表 still fills the catalog', await until(`/2 个可用模型/.test(document.getElementById('model-hint').textContent)`), true)
+check(
+  'catalog options include the endpoint model',
+  (await evaluate(`[...document.querySelectorAll('#ai-model-select option')].map((option) => option.value)`)).includes('mock-c51-model'),
+  true,
+)
+
+const shot = await send('Page.captureScreenshot', { format: 'png' })
 if (shot?.data) {
-  const { writeFile } = await import('node:fs/promises')
   await writeFile('verify/screenshot-models.png', Buffer.from(shot.data, 'base64'))
-  console.log('screenshot: verify/screenshot-models.png')
+  console.log('      screenshot: verify/screenshot-models.png')
 }
-await evaluate(`(document.getElementById('btn-settings-close').click(), 'closed')`)
+
+await evaluate(`(() => {
+  document.getElementById('btn-model-delete').click()
+  document.getElementById('btn-settings-save').click()
+  return true
+})()`)
+check('delete + save reported', await until(`/已保存到 settings.json/.test(document.getElementById('settings-status').textContent)`), true)
+after = await getSettings()
+check('deleted model is gone', after.models.map((entry) => entry.label), ['默认（死的）', 'Mock'])
+// Deleting the third entry selects its neighbour (the previous one), which is what
+// the dialog then shows — "default" would have been a different, surprising jump.
+check('active falls back to the neighbouring entry', after.activeModelId, 'mock')
+
+await rm(profile, { recursive: true, force: true }).catch(() => undefined)
+console.log(failed ? `\n${failed} check(s) failed` : '\nall checks passed')
 socket.close()
+browser.kill()
+mock.kill()
+process.exit(failed ? 1 : 0)
