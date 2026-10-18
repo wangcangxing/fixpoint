@@ -420,29 +420,54 @@ async function listSkills(projectDir, skillConfig = {}) {
 /** How many model entries the settings dialog may keep (it is a dropdown, not a DB). */
 const MAX_MODELS = 20
 
+/** Reasoning-effort ids: opaque catalogue ids, like the reference adapter's. */
+const MODEL_EFFORTS = new Set(['off', 'low', 'high', 'max'])
+
+/** A positive integer, or 0 for "not declared". */
+function sizeOrZero(value) {
+  const number = Number(value)
+  return Number.isFinite(number) && number > 0 ? Math.min(1_000_000_000, Math.floor(number)) : 0
+}
+
+/**
+ * One model entry with every field present.
+ *
+ * The reference adapter's catalogue carries capabilities next to the connection:
+ * context window, output cap, reasoning effort, whether the model thinks and
+ * whether it takes images. Only the parts chat/completions can express are sent
+ * upstream (`reasoning_effort`, `max_tokens`); the rest is advisory metadata, and
+ * the UI says so instead of pretending.
+ */
+function modelDefaults(raw = {}) {
+  return {
+    id: String(raw.id ?? '').trim().slice(0, 64),
+    label: String(raw.label ?? '').trim().slice(0, 80),
+    mode: raw.mode === 'dsh' ? 'dsh' : 'openai',
+    baseURL: String(raw.baseURL ?? '').trim().slice(0, 300),
+    model: String(raw.model ?? '').trim().slice(0, 200),
+    apiKey: String(raw.apiKey ?? ''),
+    contextWindow: sizeOrZero(raw.contextWindow),
+    maxOutputTokens: sizeOrZero(raw.maxOutputTokens),
+    reasoningEffort: MODEL_EFFORTS.has(raw.reasoningEffort) ? raw.reasoningEffort : 'off',
+    thinking: raw.thinking === true,
+    supportsImages: raw.supportsImages === true,
+  }
+}
+
 /**
  * The configured model entries.
  *
  * `models` is the multi-model shape: one entry per provider/model, each carrying
- * its own connection (mode / baseURL / model / apiKey). Settings files written
- * before this feature have only the single `ai` config, so it is exposed as one
- * synthetic entry with id `default` — nothing has to be rewritten on disk just
- * to open the dialog, and the first save persists the list for real.
+ * its own connection (mode / baseURL / model / apiKey) and catalogue metadata.
+ * Settings files written before this feature have only the single `ai` config, so
+ * it is exposed as one synthetic entry with id `default` — nothing has to be
+ * rewritten on disk just to open the dialog, and the first save persists the list.
  */
 function modelEntries(settings) {
   const list = (Array.isArray(settings.models) ? settings.models : []).filter((entry) => entry && typeof entry === 'object')
-  if (list.length) return list
+  if (list.length) return list.map(modelDefaults)
   const ai = settings.ai ?? {}
-  return [
-    {
-      id: 'default',
-      label: '',
-      mode: ai.mode ?? 'openai',
-      baseURL: ai.baseURL ?? '',
-      model: ai.model ?? '',
-      apiKey: ai.apiKey ?? '',
-    },
-  ]
+  return [modelDefaults({ id: 'default', mode: ai.mode, baseURL: ai.baseURL, model: ai.model, apiKey: ai.apiKey })]
 }
 
 /** The entry chat and completion run on. */
@@ -471,17 +496,22 @@ function cleanModels(submitted, current) {
     seen.add(id)
     const previous = byId.get(id) ?? {}
     const typed = typeof raw.apiKey === 'string' ? raw.apiKey.trim() : ''
-    list.push({
-      id,
-      label: String(raw.label ?? '').trim().slice(0, 80),
-      mode: raw.mode === 'dsh' ? 'dsh' : 'openai',
-      baseURL: String(raw.baseURL ?? '').trim().slice(0, 300),
-      model: String(raw.model ?? '').trim().slice(0, 200),
-      // A blank key means "leave the stored one alone", exactly like `ai.apiKey`.
-      apiKey: typed || String(previous.apiKey ?? ''),
-    })
+    // A blank key means "leave the stored one alone", exactly like `ai.apiKey`.
+    list.push(modelDefaults({ ...raw, id, apiKey: typed || previous.apiKey }))
   }
   return list
+}
+
+/**
+ * `reasoning_effort` for an OpenAI-compatible body.
+ *
+ * The reference adapter exposes off / low / high / max. chat/completions only
+ * knows low / medium / high, so `max` goes out as `high` and `off` sends nothing
+ * (this protocol has no way to force thinking off). The dialog states both.
+ */
+function reasoningEffortField(effort) {
+  const mapped = { low: 'low', high: 'high', max: 'high' }[String(effort ?? '')]
+  return mapped ? { reasoning_effort: mapped } : {}
 }
 
 /**
@@ -501,6 +531,11 @@ function effectiveAi(settings, aiPatch = {}) {
     baseURL: active.baseURL ?? ai.baseURL,
     model: active.model ?? ai.model,
     apiKey: active.apiKey ?? ai.apiKey,
+    contextWindow: active.contextWindow ?? 0,
+    maxOutputTokens: active.maxOutputTokens ?? 0,
+    reasoningEffort: active.reasoningEffort ?? 'off',
+    thinking: active.thinking === true,
+    supportsImages: active.supportsImages === true,
     ...aiPatch,
   }
   const inline = ai.inline ?? {}
@@ -511,6 +546,11 @@ function effectiveAi(settings, aiPatch = {}) {
     apiKey: String(process.env.KEIL_IDE_AI_KEY ?? merged.apiKey ?? ''),
     temperature: typeof ai.temperature === 'number' ? ai.temperature : 0.2,
     maxTokens: Number.isInteger(ai.maxTokens) ? ai.maxTokens : 2048,
+    contextWindow: sizeOrZero(merged.contextWindow),
+    maxOutputTokens: sizeOrZero(merged.maxOutputTokens),
+    reasoningEffort: MODEL_EFFORTS.has(merged.reasoningEffort) ? merged.reasoningEffort : 'off',
+    thinking: merged.thinking === true,
+    supportsImages: merged.supportsImages === true,
     stream: ai.stream !== false,
     inline: {
       enabled: process.env.KEIL_IDE_INLINE === '0' ? false : inline.enabled !== false,
@@ -547,6 +587,11 @@ function redactSettings(settings) {
       mode: entry.mode ?? 'openai',
       baseURL: entry.baseURL ?? '',
       model: entry.model ?? '',
+      contextWindow: entry.contextWindow ?? 0,
+      maxOutputTokens: entry.maxOutputTokens ?? 0,
+      reasoningEffort: entry.reasoningEffort ?? 'off',
+      thinking: entry.thinking === true,
+      supportsImages: entry.supportsImages === true,
       apiKeySet: Boolean(entry.apiKey),
       apiKeyHint: entry.apiKey ? `****${entry.apiKey.slice(-4)}` : '',
     })),
@@ -668,7 +713,8 @@ async function chatOnce(ai, messages) {
         model: ai.model,
         messages,
         temperature: ai.temperature,
-        max_tokens: ai.maxTokens,
+        max_tokens: ai.maxOutputTokens > 0 ? ai.maxOutputTokens : ai.maxTokens,
+        ...reasoningEffortField(ai.reasoningEffort),
         stream: false,
       }),
     })
@@ -713,7 +759,8 @@ async function streamChat(res, ai, messages) {
         model: ai.model,
         messages,
         temperature: ai.temperature,
-        max_tokens: ai.maxTokens,
+        max_tokens: ai.maxOutputTokens > 0 ? ai.maxOutputTokens : ai.maxTokens,
+        ...reasoningEffortField(ai.reasoningEffort),
         stream: true,
       }),
       signal: controller.signal,

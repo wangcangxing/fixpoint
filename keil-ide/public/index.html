@@ -233,6 +233,36 @@
           <span>模型名</span>
           <input type="text" id="ai-model" placeholder="deepseek-chat（也可手动填写）" />
         </label>
+        <label class="field">
+          <span>上下文窗口</span>
+          <input type="text" id="ai-context" placeholder="例如 1000000（目录标注，不进请求）" />
+        </label>
+        <label class="field">
+          <span>输出上限</span>
+          <input type="text" id="ai-max-output" placeholder="留空 = 用下面的全局上限" />
+        </label>
+        <label class="field">
+          <span>推理强度</span>
+          <select id="ai-effort">
+            <option value="off">off（不发送推理参数）</option>
+            <option value="low">low</option>
+            <option value="high">high</option>
+            <option value="max">max（按 high 发送）</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>thinking</span>
+          <input type="checkbox" id="ai-thinking" />
+        </label>
+        <label class="field">
+          <span>支持图片</span>
+          <input type="checkbox" id="ai-images" />
+        </label>
+        <p class="hint">
+          上下文窗口、thinking、支持图片只是<b>模型目录标注</b>（用于辨认与核对能力，不会进请求）；
+          <b>输出上限</b>会作为 <code>max_tokens</code> 发送（留空则用全局值）；
+          <b>推理强度</b>按 OpenAI 兼容接口的 <code>reasoning_effort</code> 发送：low / high 原样、<b>max 按 high</b>、off 不发送。
+        </p>
         <div class="modal-row">
           <button id="btn-fetch-models">获取模型列表</button>
           <span id="model-hint" class="dim"></span>

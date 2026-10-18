@@ -1224,6 +1224,13 @@ function flushModelEntry() {
   entry.mode = $('ai-mode').value === 'dsh' ? 'dsh' : 'openai'
   entry.baseURL = $('ai-baseurl').value.trim()
   entry.model = $('ai-model').value.trim()
+  // Catalogue metadata (context window / thinking / images) plus the output cap and
+  // the reasoning-effort id; the server decides which of them reach the request.
+  entry.contextWindow = Number($('ai-context').value) || 0
+  entry.maxOutputTokens = Number($('ai-max-output').value) || 0
+  entry.reasoningEffort = $('ai-effort').value || 'off'
+  entry.thinking = $('ai-thinking').checked
+  entry.supportsImages = $('ai-images').checked
   const typed = $('ai-key').value.trim()
   if (typed) entry.apiKey = typed
 }
@@ -1236,6 +1243,11 @@ function loadModelEntry(entry) {
   $('ai-mode').value = entry.mode === 'dsh' ? 'dsh' : 'openai'
   $('ai-baseurl').value = entry.baseURL ?? ''
   $('ai-model').value = entry.model ?? ''
+  $('ai-context').value = entry.contextWindow ? String(entry.contextWindow) : ''
+  $('ai-max-output').value = entry.maxOutputTokens ? String(entry.maxOutputTokens) : ''
+  $('ai-effort').value = ['off', 'low', 'high', 'max'].includes(entry.reasoningEffort) ? entry.reasoningEffort : 'off'
+  $('ai-thinking').checked = entry.thinking === true
+  $('ai-images').checked = entry.supportsImages === true
   const key = $('ai-key')
   key.value = entry.apiKey ?? ''
   key.placeholder = entry.apiKey
@@ -1253,7 +1265,17 @@ function renderModelList() {
     const option = document.createElement('option')
     option.value = entry.id
     option.textContent = entry.label || entry.model || entry.baseURL || '（未命名模型）'
-    option.title = [entry.mode === 'dsh' ? '本机 DSH headless' : entry.baseURL, entry.model].filter(Boolean).join(' · ')
+    option.title = [
+      entry.mode === 'dsh' ? '本机 DSH headless' : entry.baseURL,
+      entry.model,
+      entry.contextWindow ? `上下文 ${entry.contextWindow}` : '',
+      entry.maxOutputTokens ? `输出上限 ${entry.maxOutputTokens}` : '',
+      entry.reasoningEffort && entry.reasoningEffort !== 'off' ? `推理 ${entry.reasoningEffort}` : '',
+      entry.thinking ? 'thinking' : '',
+      entry.supportsImages ? '图片' : '',
+    ]
+      .filter(Boolean)
+      .join(' · ')
     list.appendChild(option)
   }
   list.value = state.activeModelId
@@ -1367,6 +1389,11 @@ function formSettingsPatch() {
       mode: entry.mode,
       baseURL: entry.baseURL,
       model: entry.model,
+      contextWindow: entry.contextWindow ?? 0,
+      maxOutputTokens: entry.maxOutputTokens ?? 0,
+      reasoningEffort: entry.reasoningEffort ?? 'off',
+      thinking: entry.thinking === true,
+      supportsImages: entry.supportsImages === true,
       ...(entry.apiKey ? { apiKey: entry.apiKey } : {}),
     })),
     activeModelId: state.activeModelId,
@@ -2959,6 +2986,11 @@ async function boot() {
       model: '',
       apiKey: '',
       apiKeySet: false,
+      contextWindow: 0,
+      maxOutputTokens: 0,
+      reasoningEffort: 'off',
+      thinking: false,
+      supportsImages: false,
     }
     state.modelConfigs.push(entry)
     loadModelEntry(entry)

@@ -111,6 +111,50 @@ const chat = await sendChat()
 check('chat carries the active entry model', chat.model, 'mock-model')
 check('chat used the active entry base URL (mock got the request)', chat.messages?.length > 0, true)
 
+/** The two entries the rest of the run keeps switching between. */
+const catalogue = (overrides = {}) => [
+  { id: 'default', label: '默认（死的）', mode: 'openai', baseURL: DEAD, model: 'dead-model' },
+  { id: 'mock', label: 'Mock', mode: 'openai', baseURL: mockBase, model: 'mock-model', apiKey: 'sk-test-1234', ...overrides },
+]
+
+// --- catalogue metadata and the two parameters chat/completions can express ---
+settings = await postSettings({
+  models: catalogue({ contextWindow: 128000, maxOutputTokens: 123, reasoningEffort: 'low', thinking: true, supportsImages: true }),
+  activeModelId: 'mock',
+})
+const entry = settings.models[1]
+check(
+  'catalogue fields round-trip',
+  [entry.contextWindow, entry.maxOutputTokens, entry.reasoningEffort, entry.thinking, entry.supportsImages],
+  [128000, 123, 'low', true, true],
+)
+
+let request = await sendChat()
+check('per-model output cap becomes max_tokens', request.max_tokens, 123)
+check('reasoning effort low goes out as low', request.reasoning_effort, 'low')
+
+await postSettings({ models: catalogue({ reasoningEffort: 'max' }), activeModelId: 'mock' })
+request = await sendChat()
+check('max is sent as high (chat/completions has no max)', request.reasoning_effort, 'high')
+
+await postSettings({ models: catalogue({ reasoningEffort: 'off' }), activeModelId: 'mock' })
+request = await sendChat()
+check('off sends no reasoning_effort at all', 'reasoning_effort' in request, false)
+
+await postSettings({ models: catalogue({ maxOutputTokens: 0 }), activeModelId: 'mock' })
+request = await sendChat()
+check('no per-model cap falls back to the global maxTokens', request.max_tokens, 4096)
+
+settings = await postSettings({
+  models: catalogue({ contextWindow: -5, maxOutputTokens: 'abc', reasoningEffort: 'turbo' }),
+  activeModelId: 'mock',
+})
+check(
+  'invalid catalogue values are normalized',
+  [settings.models[1].contextWindow, settings.models[1].maxOutputTokens, settings.models[1].reasoningEffort],
+  [0, 0, 'off'],
+)
+
 await postSettings({ activeModelId: 'default' })
 const probeDead = await probeModels()
 check('switching the active entry really switches the endpoint', probeDead.ok, false)
@@ -129,10 +173,7 @@ settings = await postSettings({
 check('invalid active id falls back to the first', settings.activeModelId, 'a')
 
 settings = await postSettings({
-  models: [
-    { id: 'default', label: '默认（死的）', mode: 'openai', baseURL: DEAD, model: 'dead-model' },
-    { id: 'mock', label: 'Mock', mode: 'openai', baseURL: mockBase, model: 'mock-model', apiKey: 'sk-test-1234' },
-  ],
+  models: catalogue({ contextWindow: 128000, maxOutputTokens: 123, reasoningEffort: 'low', thinking: true, supportsImages: true }),
   activeModelId: 'mock',
 })
 
@@ -226,11 +267,21 @@ const before = await evaluate(`(() => ({
   baseURL: document.getElementById('ai-baseurl').value,
   model: document.getElementById('ai-model').value,
   keyPlaceholder: document.getElementById('ai-key').placeholder,
+  context: document.getElementById('ai-context').value,
+  maxOutput: document.getElementById('ai-max-output').value,
+  effort: document.getElementById('ai-effort').value,
+  thinking: document.getElementById('ai-thinking').checked,
+  images: document.getElementById('ai-images').checked,
 }))()`)
 check('existing models listed', before.options, ['默认（死的）', 'Mock'])
 check('active model preselected', before.active, 'mock')
 check('fields show the active entry', [before.label, before.baseURL, before.model], ['Mock', mockBase, 'mock-model'])
 check('key placeholder says it is stored', /已保存 \*\*\*\*1234/.test(before.keyPlaceholder), true)
+check(
+  'catalogue fields shown for the entry',
+  [before.context, before.maxOutput, before.effort, before.thinking, before.images],
+  ['128000', '123', 'low', true, true],
+)
 
 await evaluate(`(() => {
   document.getElementById('btn-model-add').click()
@@ -238,6 +289,10 @@ await evaluate(`(() => {
   document.getElementById('ai-baseurl').value = ${JSON.stringify(mockBase)}
   document.getElementById('ai-model').value = 'ui-model'
   document.getElementById('ai-key').value = 'sk-ui-5678'
+  document.getElementById('ai-context').value = '64000'
+  document.getElementById('ai-max-output').value = '2048'
+  document.getElementById('ai-effort').value = 'high'
+  document.getElementById('ai-thinking').checked = true
   document.getElementById('btn-settings-save').click()
   return true
 })()`)
@@ -248,6 +303,11 @@ check('new model persisted', after.models.map((entry) => entry.label), ['默认�
 const newId = after.models[2].id
 check('new model is active', after.activeModelId, newId)
 check('new model key stored + redacted', [after.models[2].apiKeySet, after.models[2].apiKeyHint, 'apiKey' in after.models[2]], [true, '****5678', false])
+check(
+  'new model catalogue saved',
+  [after.models[2].contextWindow, after.models[2].maxOutputTokens, after.models[2].reasoningEffort, after.models[2].thinking, after.models[2].supportsImages],
+  [64000, 2048, 'high', true, false],
+)
 check('list reflects the save', await evaluate(`document.querySelectorAll('#ai-model-list option').length`), 3)
 
 // Switching entries must move the fields with it.
@@ -255,17 +315,24 @@ const switched = await evaluate(`(() => {
   const select = document.getElementById('ai-model-list')
   select.value = 'default'
   select.dispatchEvent(new Event('change', { bubbles: true }))
-  return { baseURL: document.getElementById('ai-baseurl').value, label: document.getElementById('ai-label').value }
+  return {
+    baseURL: document.getElementById('ai-baseurl').value,
+    label: document.getElementById('ai-label').value,
+    context: document.getElementById('ai-context').value,
+    effort: document.getElementById('ai-effort').value,
+  }
 })()`)
 check('switching loads that entry', [switched.label, switched.baseURL], ['默认（死的）', DEAD])
+check('switching loads its catalogue too', [switched.context, switched.effort], ['', 'off'])
 
-await evaluate(`(() => {
+const back = await evaluate(`(() => {
   const select = document.getElementById('ai-model-list')
   select.value = ${JSON.stringify(newId)}
   select.dispatchEvent(new Event('change', { bubbles: true }))
   document.getElementById('btn-ai-test').click()
-  return true
+  return { context: document.getElementById('ai-context').value, effort: document.getElementById('ai-effort').value }
 })()`)
+check('switching back restores the catalogue', [back.context, back.effort], ['64000', 'high'])
 check('test connection uses the picked entry', await until(`/连接成功/.test(document.getElementById('settings-status').textContent)`), true)
 
 await evaluate(`document.getElementById('btn-fetch-models').click(); true`)
