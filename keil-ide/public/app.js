@@ -400,7 +400,18 @@ function renderMarkdown(text) {
 function truncationNote() {
   const note = document.createElement('div')
   note.className = 'md-note'
-  note.textContent = `⚠ 回答到长度上限被截断了（本次最多 ${state.ai?.maxTokens ?? 4096} 个词元；可在"设置 → AI 后端"里调大"聊天最多生成"）`
+  const cap = state.ai?.maxTokens
+  note.textContent = cap
+    ? `⚠ 回答到提供方的长度上限被截断了（本次最多 ${cap} 个词元；可在"设置 → AI 后端"里调大"聊天最多生成"）`
+    : '⚠ 回答被提供方按自身的长度上限截断了（本地没有设词元上限；可把"输出字符上限"调大，或检查模型的最大输出）'
+  return note
+}
+
+/** The character budget is the app's own runaway guard — say exactly where it stopped. */
+function charLimitNote({ limit = 0, chars = 0 } = {}) {
+  const note = document.createElement('div')
+  note.className = 'md-note'
+  note.textContent = `⏹ 已达到输出字符上限（${chars} / ${limit} 字，思考与正文合计），已强制结束并断开上游。可在「设置 → AI 后端 → 输出字符上限」调大，或设为 0 不限。`
   return note
 }
 
@@ -439,11 +450,12 @@ function emptyReplyNote({ reasoning = '', finishReason = '', usage = null, maxTo
   note.className = 'md-note'
   if (reasoning) {
     const completion = Number(usage?.completion_tokens ?? 0)
+    const capText = maxTokens > 0 ? `本次词元上限 ${maxTokens}` : '本次没有设词元上限（0 = 不限）'
     note.textContent =
       `上游只返回了思考过程，没有正文（思考 ${reasoning.length} 字` +
       `${completion ? `，上游报告生成 ${completion} 个词元` : ''}` +
-      `${finishReason ? `，finish_reason=${finishReason}` : ''}）。` +
-      `常见原因：思考把输出预算用完了（本次上限 ${maxTokens || '未知'}）——把「设置 → AI 后端 → 输出上限」或「聊天最多生成」调大，或把推理强度设为 off 再试。`
+      `${finishReason ? `，finish_reason=${finishReason}` : ''}）。${capText}；` +
+      '如果词元也不限，那就是提供方/网关只回了 reasoning_content，或模型输出被上游截断——可把「输出字符上限」调大后重试。'
   } else {
     note.textContent =
       `上游返回了空回复（HTTP 200，但 content 为空${finishReason ? `，finish_reason=${finishReason}` : ''}）。` +
@@ -881,6 +893,7 @@ async function send() {
       let usage = null
       let lastRender = 0
       let finishReason = ''
+      let charLimit = 0
       const handlePayload = (payload) => {
         if (payload.error) {
           box.className = 'msg err'
@@ -907,6 +920,7 @@ async function send() {
           if (payload.text) full = payload.text
           if (typeof payload.reasoning === 'string' && payload.reasoning) reasoning = payload.reasoning
           if (payload.usage) usage = payload.usage
+          if (payload.limit) charLimit = Number(payload.limit)
           if (payload.finishReason) finishReason = String(payload.finishReason)
         }
       }
@@ -945,9 +959,12 @@ async function send() {
       if (reasoning) setThinkText(box, reasoning)
       if (full) {
         box.setBody(full)
-        // Say it out loud when the provider cut the answer at the token cap: a short
-        // reply with no explanation is the second half of "回复被截断".
-        if (finishReason === 'length') box.bodyEl.appendChild(truncationNote())
+        // Which cap stopped it: our character budget or the provider's own limit.
+        if (finishReason === 'chars') {
+          box.bodyEl.appendChild(charLimitNote({ limit: charLimit, chars: full.length + reasoning.length }))
+        } else if (finishReason === 'length') {
+          box.bodyEl.appendChild(truncationNote())
+        }
       } else {
         // Never leave a silent blank bubble: explain what came back instead.
         box.setBody('')
@@ -975,7 +992,13 @@ async function send() {
       if (reasoning) setThinkText(box, reasoning)
       if (data.text) {
         box.setBody(data.text)
-        if (data.finishReason === 'length') box.bodyEl.appendChild(truncationNote())
+        if (data.finishReason === 'chars') {
+          box.bodyEl.appendChild(
+            charLimitNote({ limit: data.limit ?? 0, chars: data.text.length + (data.reasoning ?? '').length }),
+          )
+        } else if (data.finishReason === 'length') {
+          box.bodyEl.appendChild(truncationNote())
+        }
       } else {
         box.bodyEl.appendChild(
           emptyReplyNote({
@@ -1513,7 +1536,8 @@ async function openSettings() {
   renderModelList()
   loadModelEntry(state.modelConfigs.find((entry) => entry.id === state.activeModelId) ?? state.modelConfigs[0])
   $('ai-temp').value = settings.ai.temperature
-  $('ai-max-tokens').value = settings.ai.maxTokens ?? 4096
+  $('ai-max-tokens').value = settings.ai.maxTokens ?? 0
+  $('ai-max-chars').value = settings.ai.maxOutputChars ?? 20000
 
   // --- 代码补全 ---
   const inline = settings.ai.inline ?? {}
@@ -1582,7 +1606,8 @@ function formSettingsPatch() {
     model: $('ai-model').value.trim(),
     temperature: Number($('ai-temp').value) || 0,
     // The CHAT answer limit (the inline-completion limit lives under ai.inline).
-    maxTokens: Number($('ai-max-tokens').value) || 4096,
+    maxTokens: Number($('ai-max-tokens').value) || 0,
+    maxOutputChars: Number($('ai-max-chars').value) || 0,
     inline: {
       enabled: $('ai-inline').checked,
       maxTokens: Number($('ai-inline-tokens').value) || 96,

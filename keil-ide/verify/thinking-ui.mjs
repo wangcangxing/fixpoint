@@ -196,7 +196,7 @@ console.log(`      thinking: ${JSON.stringify({ hasThink: thinkOnly.hasThink, th
 check('thinking block is shown', thinkOnly.hasThink, true)
 check('thinking block carries the chain of thought', thinkOnly.thinkText.includes('模拟思考过程'), true)
 check('no blank "(空回复)" placeholder', thinkOnly.body.includes('(空回复)'), false)
-check('an explanation is shown', /只返回了思考过程/.test(thinkOnly.note) && /输出预算/.test(thinkOnly.note), true)
+check('an explanation is shown', /只返回了思考过程/.test(thinkOnly.note) && /词元上限|reasoning_content/.test(thinkOnly.note), true)
 check('nothing to apply', thinkOnly.applyDisabled, true)
 
 const shot = await send('Page.captureScreenshot', { format: 'png' })

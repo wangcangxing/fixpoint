@@ -188,9 +188,16 @@ const DEFAULT_SETTINGS = {
     model: 'deepseek-flash',
     apiKey: '',
     temperature: 0.2,
-    // Chat answer cap. 2048 cut longer explanations mid-sentence (and the UI never
-    // said why); 4096 covers a full Markdown walkthrough with code.
-    maxTokens: 4096,
+    // NO output-token cap by default (0 = don't send `max_tokens`, let the provider
+    // use its own limit). A small cap is what made thinking models come back empty:
+    // the chain of thought ate the whole budget before any answer was written.
+    // Runaway protection is the CHARACTER limit below instead, which is visible and
+    // predictable regardless of how the provider counts reasoning tokens.
+    maxTokens: 0,
+    // Force-stop a streamed answer once thinking + answer exceed this many characters
+    // (0 = unlimited). Counts both fields on purpose: a runaway chain of thought is
+    // exactly what an unbounded request must not be allowed to do.
+    maxOutputChars: 20000,
     stream: true,
     // Inline (ghost text) completion. It fires on typing, so the budget matters:
     // small maxTokens, a real stop sequence, debounce, cancel-on-type, and a cache.
@@ -540,6 +547,16 @@ function reasoningEffortField(effort) {
 }
 
 /**
+ * The output-token cap to send: the model's own limit wins, then the global one.
+ * 0 means "send nothing" — the provider's default (usually the model maximum).
+ */
+function outputCap(ai) {
+  if (Number(ai.maxOutputTokens) > 0) return Number(ai.maxOutputTokens)
+  if (Number(ai.maxTokens) > 0) return Number(ai.maxTokens)
+  return 0
+}
+
+/**
  * Effective AI config (environment overrides win over settings.json).
  *
  * The ACTIVE model entry owns the connection; temperature / maxTokens / stream
@@ -570,7 +587,10 @@ function effectiveAi(settings, aiPatch = {}) {
     model: String(process.env.KEIL_IDE_AI_MODEL ?? merged.model ?? 'deepseek-chat'),
     apiKey: String(process.env.KEIL_IDE_AI_KEY ?? merged.apiKey ?? ''),
     temperature: typeof ai.temperature === 'number' ? ai.temperature : 0.2,
-    maxTokens: Number.isInteger(ai.maxTokens) ? ai.maxTokens : 2048,
+    // 0 = do not send `max_tokens` at all (provider default / model maximum).
+    maxTokens: Number.isInteger(merged.maxTokens) ? merged.maxTokens : 0,
+    // Character guard for the streamed answer (thinking + text), 0 = off.
+    maxOutputChars: sizeOrZero(merged.maxOutputChars),
     contextWindow: sizeOrZero(merged.contextWindow),
     maxOutputTokens: sizeOrZero(merged.maxOutputTokens),
     reasoningEffort: MODEL_EFFORTS.has(merged.reasoningEffort) ? merged.reasoningEffort : 'off',
@@ -738,7 +758,7 @@ async function chatOnce(ai, messages) {
         model: ai.model,
         messages,
         temperature: ai.temperature,
-        max_tokens: ai.maxOutputTokens > 0 ? ai.maxOutputTokens : ai.maxTokens,
+        ...(outputCap(ai) > 0 ? { max_tokens: outputCap(ai) } : {}),
         ...reasoningEffortField(ai.reasoningEffort),
         stream: false,
       }),
@@ -749,17 +769,24 @@ async function chatOnce(ai, messages) {
     }
     const json = JSON.parse(raw)
     const message = json.choices?.[0]?.message ?? {}
+    const reasoning = message.reasoning_content ?? message.reasoning ?? ''
+    const limit = sizeOrZero(ai.maxOutputChars)
+    let text = message.content ?? ''
+    const truncated = limit > 0 && text.length + reasoning.length > limit
+    if (truncated) text = text.slice(0, limit)
     return {
       ok: true,
-      text: message.content ?? '',
+      text,
       // Thinking models put the chain of thought in a SEPARATE field. Ignoring it
       // made a budget-exhausted thinking model look like a silent empty reply.
-      reasoning: message.reasoning_content ?? message.reasoning ?? '',
+      reasoning,
+      truncated,
+      limit,
       url,
       model: json.model ?? ai.model,
       usage: json.usage ?? null,
       // "length" = the provider cut the answer at the token cap.
-      finishReason: json.choices?.[0]?.finish_reason ?? '',
+      finishReason: truncated ? 'chars' : json.choices?.[0]?.finish_reason ?? '',
     }
   } catch (error) {
     return { ok: false, error: `无法连接 ${url}: ${error.message}`, url }
@@ -788,7 +815,7 @@ async function streamChat(res, ai, messages) {
         model: ai.model,
         messages,
         temperature: ai.temperature,
-        max_tokens: ai.maxOutputTokens > 0 ? ai.maxOutputTokens : ai.maxTokens,
+        ...(outputCap(ai) > 0 ? { max_tokens: outputCap(ai) } : {}),
         ...reasoningEffortField(ai.reasoningEffort),
         stream: true,
       }),
@@ -810,6 +837,12 @@ async function streamChat(res, ai, messages) {
     let reasoning = ''
     let usage = null
     let finishReason = ''
+    // Runaway guard: stop as soon as thinking + answer exceed the configured
+    // character budget, and cancel the upstream so we stop paying for tokens we
+    // will never show. A token cap cannot do this reliably: thinking tokens are
+    // counted differently by each provider.
+    const maxChars = sizeOrZero(ai.maxOutputChars)
+    let stoppedForLimit = false
     const handleLine = (line) => {
       if (!line.startsWith('data:')) return
       const payload = line.slice(5).trim()
@@ -845,6 +878,27 @@ async function streamChat(res, ai, messages) {
         buffer = buffer.slice(index + 1)
         handleLine(line)
       }
+      if (maxChars > 0 && full.length + reasoning.length > maxChars) {
+        stoppedForLimit = true
+        break
+      }
+    }
+    if (stoppedForLimit) {
+      await reader.cancel().catch(() => {})
+      send({
+        done: true,
+        text: full,
+        reasoning,
+        url,
+        model: ai.model,
+        usage,
+        finishReason: 'chars',
+        truncated: true,
+        limit: maxChars,
+        contentChars: full.length,
+        reasoningChars: reasoning.length,
+      })
+      return usage
     }
     // Flush the tail: a final `data:` line often arrives WITHOUT a trailing newline,
     // and a multi-byte character can still sit inside the decoder. Dropping that tail
@@ -862,7 +916,8 @@ async function streamChat(res, ai, messages) {
       finishReason,
       contentChars: full.length,
       reasoningChars: reasoning.length,
-      maxTokens: ai.maxOutputTokens > 0 ? ai.maxOutputTokens : ai.maxTokens,
+      maxTokens: outputCap(ai),
+      maxOutputChars: sizeOrZero(ai.maxOutputChars),
     })
     return usage
   } catch (error) {

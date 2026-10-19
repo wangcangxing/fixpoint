@@ -92,7 +92,10 @@ const server = createServer((req, res) => {
         res.writeHead(400, { 'content-type': 'application/json' })
         return res.end(JSON.stringify({ error: { message: 'invalid JSON body' } }))
       }
-      const answer = cannedAnswer(body)
+      const answer =
+        process.env.MOCK_LONG === '1'
+          ? '这是一段用于撑爆字符上限的长文本，每行都不短。\n'.repeat(200)
+          : cannedAnswer(body)
       lastRequest = body
       // Thinking-model switches:
       //   MOCK_REASONING=1       stream a chain of thought, THEN the normal answer

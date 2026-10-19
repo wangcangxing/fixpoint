@@ -143,7 +143,8 @@ check('off sends no reasoning_effort at all', 'reasoning_effort' in request, fal
 
 await postSettings({ models: catalogue({ maxOutputTokens: 0 }), activeModelId: 'mock' })
 request = await sendChat()
-check('no per-model cap falls back to the global maxTokens', request.max_tokens, 4096)
+// The global cap defaults to 0 = "unlimited", so the field is not sent at all.
+check('no cap at all sends no max_tokens', 'max_tokens' in request, false)
 
 settings = await postSettings({
   models: catalogue({ contextWindow: -5, maxOutputTokens: 'abc', reasoningEffort: 'turbo' }),

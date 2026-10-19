@@ -264,7 +264,7 @@
         </label>
         <p class="hint">
           上下文窗口、thinking、支持图片只是<b>模型目录标注</b>（用于辨认与核对能力，不会进请求）；
-          <b>输出上限</b>会作为 <code>max_tokens</code> 发送（留空则用全局值）；
+          <b>输出上限</b>会作为 <code>max_tokens</code> 发送（留空或 0 = <b>不发送</b>，用提供方自己的上限）；
           <b>推理强度</b>按 OpenAI 兼容接口的 <code>reasoning_effort</code> 发送：low / high 原样、<b>max 按 high</b>、off 不发送。
         </p>
         <div class="modal-row">
@@ -281,8 +281,16 @@
         </label>
         <label class="field">
           <span>聊天最多生成（词元）</span>
-          <input type="text" id="ai-max-tokens" placeholder="4096" />
+          <input type="text" id="ai-max-tokens" placeholder="0 = 不限（不发送 max_tokens）" />
         </label>
+        <label class="field">
+          <span>输出字符上限</span>
+          <input type="text" id="ai-max-chars" placeholder="20000（0 = 不限；超出就强制结束）" />
+        </label>
+        <p class="hint">
+          词元上限默认 <b>0（不限）</b>：不发送 <code>max_tokens</code>，让提供方用它自己的上限——思考模型被小上限卡成"只有思考、没有正文"就是这个原因。
+          真正防跑飞的是<b>输出字符上限</b>：思考与正文合计超过这个字数就<b>立刻断开上游</b>并结束本轮（0 = 不限）。
+        </p>
         </section>
 
         <section class="pane-tab" data-pane="completion">
