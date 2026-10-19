@@ -95,7 +95,11 @@ const chat = async (prompt) => {
     try {
       const payload = JSON.parse(line.slice(5).trim())
       if (payload.delta) text += payload.delta
-      if (payload.done) done = payload
+      if (payload.done) {
+        done = payload
+        // The done frame carries the authoritative (trimmed) text.
+        if (payload.text) text = payload.text
+      }
     } catch {
       // ignore partial frames
     }
@@ -112,7 +116,7 @@ let request = await lastRequest()
 check('no max_tokens is sent when the cap is 0', 'max_tokens' in request, false)
 check('runaway answer is cut early', result.done?.finishReason, 'chars')
 check('the cap is reported', result.done?.truncated === true && result.done?.limit === 500, true)
-check('it stops near the cap, not at the end', result.text.length > 500 && result.text.length < 4000, true)
+check('it stops exactly at the cap', result.text.length, 500)
 check('done reports both character counts', result.done?.contentChars === result.text.length, true)
 
 /* ---------- C: 0 = unlimited ---------- */

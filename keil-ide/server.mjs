@@ -864,6 +864,10 @@ async function streamChat(res, ai, messages) {
           full += delta
           send({ delta })
         }
+        // Check per LINE, not per network chunk: one chunk can carry dozens of
+        // deltas, and stopping only after the chunk overshoots the budget by ~2k
+        // characters (the UI then showed "2440 / 500").
+        if (maxChars > 0 && full.length + reasoning.length > maxChars) stoppedForLimit = true
       } catch {
         // providers emit keep-alive comments and non-JSON frames; ignore them
       }
@@ -877,17 +881,19 @@ async function streamChat(res, ai, messages) {
         const line = buffer.slice(0, index).trim()
         buffer = buffer.slice(index + 1)
         handleLine(line)
+        if (stoppedForLimit) break
       }
-      if (maxChars > 0 && full.length + reasoning.length > maxChars) {
-        stoppedForLimit = true
-        break
-      }
+      if (stoppedForLimit) break
     }
     if (stoppedForLimit) {
       await reader.cancel().catch(() => {})
+      // Trim the overshoot so the stored/rendered text really is within budget:
+      // thinking already spent part of it, so the answer gets what is left.
+      const room = Math.max(0, maxChars - reasoning.length)
+      const text = full.slice(0, room)
       send({
         done: true,
-        text: full,
+        text,
         reasoning,
         url,
         model: ai.model,
@@ -895,7 +901,7 @@ async function streamChat(res, ai, messages) {
         finishReason: 'chars',
         truncated: true,
         limit: maxChars,
-        contentChars: full.length,
+        contentChars: text.length,
         reasoningChars: reasoning.length,
       })
       return usage
