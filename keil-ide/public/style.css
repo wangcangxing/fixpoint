@@ -328,6 +328,31 @@ body.resizing-v { cursor: row-resize; user-select: none; }
   color: var(--warn);
   font-size: 12px;
 }
+/* Thinking models stream their chain of thought into a separate field; show it in a
+   collapsible block above the answer instead of throwing it away. */
+.msg .think {
+  margin-bottom: 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #171a1f;
+}
+.msg .think summary {
+  padding: 4px 6px;
+  color: var(--dim);
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+.msg .think pre {
+  margin: 0;
+  padding: 4px 8px 8px;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #b9c0cc;
+  font: 11px/1.5 monospace;
+}
 .chat textarea { margin: 0 8px; width: calc(100% - 16px); resize: vertical; }
 .chat .row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-size: 12px; flex-wrap: wrap; }
 .chat .row label { white-space: nowrap; }

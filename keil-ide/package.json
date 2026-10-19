@@ -1,7 +1,7 @@
 {
   "name": "fixpoint",
   "productName": "Fixpoint",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "description": "One-window AI IDE for 8051 microcontrollers: Monaco editor + real-compiler diagnostics + hex status + AI panel + skills + token metering. Drives whatever compiler the user already installed (BYOK).",
   "author": "wangcangxing",

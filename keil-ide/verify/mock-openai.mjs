@@ -94,6 +94,16 @@ const server = createServer((req, res) => {
       }
       const answer = cannedAnswer(body)
       lastRequest = body
+      // Thinking-model switches:
+      //   MOCK_REASONING=1       stream a chain of thought, THEN the normal answer
+      //   MOCK_THINKING_ONLY=1   stream ONLY reasoning_content and finish with
+      //                          "length" — the budget was eaten by thinking, so
+      //                          `content` stays empty (the empty-reply bug).
+      const thinkingOnly = process.env.MOCK_THINKING_ONLY === '1'
+      const reasoningText =
+        thinkingOnly || process.env.MOCK_REASONING === '1'
+          ? '先确认需求：呼吸灯要分段亮度，用定时器中断最稳。再算一下 PWM 步数与频率……（模拟思考过程）'
+          : ''
       if (body.stream) {
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
         // Test switches for the truncation bugs:
@@ -102,7 +112,26 @@ const server = createServer((req, res) => {
         //                          "\n\n" splitter silently drops the tail.
         //   MOCK_FINISH_LENGTH=1   report finish_reason "length" (provider-side cut).
         const noBlank = process.env.MOCK_TAIL_NO_BLANK === '1'
-        const finishReason = process.env.MOCK_FINISH_LENGTH === '1' ? 'length' : 'stop'
+        const finishReason = thinkingOnly || process.env.MOCK_FINISH_LENGTH === '1' ? 'length' : 'stop'
+        for (const piece of reasoningText.match(/[\s\S]{1,24}/g) ?? []) {
+          frame(res, {
+            id: 'chatcmpl-mock',
+            object: 'chat.completion.chunk',
+            model: body.model ?? 'mock-c51-model',
+            choices: [{ index: 0, delta: { reasoning_content: piece }, finish_reason: null }],
+          })
+        }
+        if (thinkingOnly) {
+          frame(res, {
+            id: 'chatcmpl-mock',
+            object: 'chat.completion.chunk',
+            model: body.model ?? 'mock-c51-model',
+            choices: [{ index: 0, delta: {}, finish_reason: 'length' }],
+            usage: usageFor(body.messages, reasoningText),
+          })
+          res.write('data: [DONE]\n\n')
+          return res.end()
+        }
         const pieces = answer.match(/[\s\S]{1,40}/g) ?? []
         for (const piece of noBlank ? pieces.slice(0, -1) : pieces) {
           frame(res, {
@@ -141,8 +170,14 @@ const server = createServer((req, res) => {
           id: 'chatcmpl-mock',
           object: 'chat.completion',
           model: body.model ?? 'mock-c51-model',
-          choices: [{ index: 0, message: { role: 'assistant', content: answer }, finish_reason: 'stop' }],
-          usage: usageFor(body.messages, answer),
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: thinkingOnly ? '' : answer, ...(reasoningText ? { reasoning_content: reasoningText } : {}) },
+              finish_reason: thinkingOnly ? 'length' : 'stop',
+            },
+          ],
+          usage: usageFor(body.messages, thinkingOnly ? reasoningText : answer),
         }),
       )
     })

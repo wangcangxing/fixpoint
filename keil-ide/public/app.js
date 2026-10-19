@@ -404,6 +404,54 @@ function truncationNote() {
   return note
 }
 
+/** Collapsible "思考过程" block: created on the first reasoning chunk, updated live. */
+function ensureThinkBlock(box) {
+  if (box.thinkEl) return box
+  const details = document.createElement('details')
+  details.className = 'think'
+  details.open = true
+  const summary = document.createElement('summary')
+  const pre = document.createElement('pre')
+  details.append(summary, pre)
+  box.insertBefore(details, box.bodyEl)
+  box.thinkEl = details
+  box.thinkSummary = summary
+  box.thinkPre = pre
+  return box
+}
+
+function setThinkText(box, text) {
+  ensureThinkBlock(box)
+  box.thinkPre.textContent = text
+  box.thinkSummary.textContent = `思考过程（${text.length} 字，点击展开/收起）`
+}
+
+/**
+ * Explain an AI bubble that ended up with no text at all.
+ *
+ * Thinking models stream the chain of thought in a field of its own and put the
+ * answer in `content`. When reasoning eats the whole output budget, `content` is
+ * empty and `finish_reason` is "length" — the reply used to look like a silent
+ * blank. We still have the reasoning, so show it and name the cause.
+ */
+function emptyReplyNote({ reasoning = '', finishReason = '', usage = null, maxTokens = 0 } = {}) {
+  const note = document.createElement('div')
+  note.className = 'md-note'
+  if (reasoning) {
+    const completion = Number(usage?.completion_tokens ?? 0)
+    note.textContent =
+      `上游只返回了思考过程，没有正文（思考 ${reasoning.length} 字` +
+      `${completion ? `，上游报告生成 ${completion} 个词元` : ''}` +
+      `${finishReason ? `，finish_reason=${finishReason}` : ''}）。` +
+      `常见原因：思考把输出预算用完了（本次上限 ${maxTokens || '未知'}）——把「设置 → AI 后端 → 输出上限」或「聊天最多生成」调大，或把推理强度设为 off 再试。`
+  } else {
+    note.textContent =
+      `上游返回了空回复（HTTP 200，但 content 为空${finishReason ? `，finish_reason=${finishReason}` : ''}）。` +
+      '检查：该模型是否支持 /chat/completions；网关是否把正文放进了 reasoning_content；或输出上限太小。'
+  }
+  return note
+}
+
 function appendMessage(kind, title, text) {
   const box = document.createElement('div')
   box.className = `msg ${kind}`
@@ -829,6 +877,8 @@ async function send() {
       const decoder = new TextDecoder()
       let buffer = ''
       let full = ''
+      let reasoning = ''
+      let usage = null
       let lastRender = 0
       let finishReason = ''
       const handlePayload = (payload) => {
@@ -836,7 +886,14 @@ async function send() {
           box.className = 'msg err'
           box.setBody(`调用失败: ${payload.error}`)
         }
+        if (payload.reason) {
+          reasoning += payload.reason
+          setThinkText(box, reasoning)
+        }
         if (payload.delta) {
+          // First real answer token: fold the thoughts away so the answer is the
+          // thing being read (it can still be reopened).
+          if (box.thinkEl && box.thinkEl.open && !full) box.thinkEl.open = false
           full += payload.delta
           // Re-render markdown as it grows, but not on every single token.
           const now = Date.now()
@@ -848,6 +905,8 @@ async function send() {
         }
         if (payload.done) {
           if (payload.text) full = payload.text
+          if (typeof payload.reasoning === 'string' && payload.reasoning) reasoning = payload.reasoning
+          if (payload.usage) usage = payload.usage
           if (payload.finishReason) finishReason = String(payload.finishReason)
         }
       }
@@ -883,10 +942,24 @@ async function send() {
       }
       buffer = ''
       state.lastReply = full
-      box.setBody(full || '(空回复)')
-      // Say it out loud when the provider cut the answer at the token cap: a short
-      // reply with no explanation is the second half of "回复被截断".
-      if (finishReason === 'length') box.bodyEl.appendChild(truncationNote())
+      if (reasoning) setThinkText(box, reasoning)
+      if (full) {
+        box.setBody(full)
+        // Say it out loud when the provider cut the answer at the token cap: a short
+        // reply with no explanation is the second half of "回复被截断".
+        if (finishReason === 'length') box.bodyEl.appendChild(truncationNote())
+      } else {
+        // Never leave a silent blank bubble: explain what came back instead.
+        box.setBody('')
+        box.bodyEl.appendChild(
+          emptyReplyNote({
+            reasoning,
+            finishReason,
+            usage,
+            maxTokens: chatModelEntry()?.maxOutputTokens || ai.maxTokens,
+          }),
+        )
+      }
       $('transcript').scrollTop = $('transcript').scrollHeight
       $('btn-apply').disabled = !extractCodeBlock(full)
       // Auto-open the side-by-side diff: current file vs the AI's block.
@@ -897,8 +970,22 @@ async function send() {
     const data = await response.json()
     state.lastReply = data.text || ''
     if (data.ok) {
-      const box = appendMessage('ai', `AI · ${data.model || ai.model || ''}`, state.lastReply || '(空回复)')
-      if (data.finishReason === 'length') box.bodyEl.appendChild(truncationNote())
+      const box = appendMessage('ai', `AI · ${data.model || ai.model || ''}`, '')
+      const reasoning = data.reasoning ?? ''
+      if (reasoning) setThinkText(box, reasoning)
+      if (data.text) {
+        box.setBody(data.text)
+        if (data.finishReason === 'length') box.bodyEl.appendChild(truncationNote())
+      } else {
+        box.bodyEl.appendChild(
+          emptyReplyNote({
+            reasoning,
+            finishReason: data.finishReason ?? '',
+            usage: data.usage,
+            maxTokens: chatModelEntry()?.maxOutputTokens || ai.maxTokens,
+          }),
+        )
+      }
     } else {
       appendMessage('err', 'AI 调用失败', `${data.error || '(无错误信息)'}${data.url ? `\nurl: ${data.url}` : ''}`)
     }

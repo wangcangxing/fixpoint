@@ -748,9 +748,13 @@ async function chatOnce(ai, messages) {
       return { ok: false, error: `上游 ${response.status}: ${raw.slice(0, 600) || '(空响应)'}`, status: response.status, url }
     }
     const json = JSON.parse(raw)
+    const message = json.choices?.[0]?.message ?? {}
     return {
       ok: true,
-      text: json.choices?.[0]?.message?.content ?? '',
+      text: message.content ?? '',
+      // Thinking models put the chain of thought in a SEPARATE field. Ignoring it
+      // made a budget-exhausted thinking model look like a silent empty reply.
+      reasoning: message.reasoning_content ?? message.reasoning ?? '',
       url,
       model: json.model ?? ai.model,
       usage: json.usage ?? null,
@@ -799,6 +803,11 @@ async function streamChat(res, ai, messages) {
     const decoder = new TextDecoder()
     let buffer = ''
     let full = ''
+    // Thinking models stream the chain of thought in `reasoning_content` (DeepSeek)
+    // or `reasoning` (some gateways). Dropping it turned every thinking-only turn —
+    // e.g. the model spending the whole max_tokens budget on reasoning — into a
+    // blank reply with no explanation.
+    let reasoning = ''
     let usage = null
     let finishReason = ''
     const handleLine = (line) => {
@@ -812,6 +821,11 @@ async function streamChat(res, ai, messages) {
         // "length" means the provider cut the answer at the token cap. Without this
         // the UI showed a short reply and said nothing about why.
         if (choice?.finish_reason) finishReason = String(choice.finish_reason)
+        const thought = choice?.delta?.reasoning_content ?? choice?.delta?.reasoning ?? ''
+        if (thought) {
+          reasoning += thought
+          send({ reason: thought })
+        }
         const delta = choice?.delta?.content ?? ''
         if (delta) {
           full += delta
@@ -838,7 +852,18 @@ async function streamChat(res, ai, messages) {
     buffer += decoder.decode()
     for (const line of buffer.split('\n')) if (line.trim()) handleLine(line.trim())
     buffer = ''
-    send({ done: true, text: full, url, model: ai.model, usage, finishReason })
+    send({
+      done: true,
+      text: full,
+      reasoning,
+      url,
+      model: ai.model,
+      usage,
+      finishReason,
+      contentChars: full.length,
+      reasoningChars: reasoning.length,
+      maxTokens: ai.maxOutputTokens > 0 ? ai.maxOutputTokens : ai.maxTokens,
+    })
     return usage
   } catch (error) {
     send({ error: `调用失败: ${error.message}`, url })
