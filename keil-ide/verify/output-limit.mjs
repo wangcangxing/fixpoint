@@ -15,7 +15,7 @@
  *   (self-contained: starts its own IDE server with a temp settings file)
  */
 import { spawn } from 'node:child_process'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -107,6 +107,25 @@ const chat = async (prompt) => {
   return { text, done }
 }
 const lastRequest = () => fetch(`http://127.0.0.1:${mockPort}/last-request`).then((response) => response.json())
+
+/* ---------- 0. the default guard, including settings files written before it ---------- */
+
+const readSettings = () => fetch(`${base}/api/settings`).then((response) => response.json())
+let live = await readSettings()
+check('fresh settings get the default character guard', live.ai.maxOutputChars, 20000)
+
+// A settings file from an older build has no `maxOutputChars`: it must inherit the
+// DEFAULT guard, otherwise the runaway protection silently stays off for everyone
+// who has used the app before this feature existed.
+const legacyFile = JSON.parse(await readFile(settingsFile, 'utf8'))
+delete legacyFile.ai.maxOutputChars
+await writeFile(settingsFile, `${JSON.stringify(legacyFile, null, 2)}\n`, 'utf8')
+live = await readSettings()
+check('legacy settings fall back to the default guard', live.ai.maxOutputChars, 20000)
+
+await postSettings({ ai: { maxOutputChars: 0 } })
+live = await readSettings()
+check('explicit 0 means unlimited', live.ai.maxOutputChars, 0)
 
 /* ---------- A + B: no token cap, character guard stops a runaway ---------- */
 

@@ -590,7 +590,12 @@ function effectiveAi(settings, aiPatch = {}) {
     // 0 = do not send `max_tokens` at all (provider default / model maximum).
     maxTokens: Number.isInteger(merged.maxTokens) ? merged.maxTokens : 0,
     // Character guard for the streamed answer (thinking + text), 0 = off.
-    maxOutputChars: sizeOrZero(merged.maxOutputChars),
+    // A settings file written before this field existed must get the DEFAULT guard,
+    // not 0: missing means "never configured", explicit 0 means "unlimited".
+    maxOutputChars:
+      merged.maxOutputChars === undefined || merged.maxOutputChars === null
+        ? DEFAULT_SETTINGS.ai.maxOutputChars
+        : sizeOrZero(merged.maxOutputChars),
     contextWindow: sizeOrZero(merged.contextWindow),
     maxOutputTokens: sizeOrZero(merged.maxOutputTokens),
     reasoningEffort: MODEL_EFFORTS.has(merged.reasoningEffort) ? merged.reasoningEffort : 'off',
@@ -647,6 +652,7 @@ function redactSettings(settings) {
       model: ai.model,
       temperature: ai.temperature,
       maxTokens: ai.maxTokens,
+      maxOutputChars: ai.maxOutputChars,
       stream: ai.stream,
       // The inline role may carry its own key: strip it like the chat key.
       // (JSON.stringify drops `undefined`, so no key can reach the browser.)
