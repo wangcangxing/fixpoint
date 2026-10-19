@@ -58,7 +58,7 @@ const MONACO_DIR = join(here, 'node_modules', 'monaco-editor', 'min', 'vs')
 const SETTINGS_PATH = process.env.KEIL_IDE_SETTINGS || join(here, 'settings.json')
 const PORT = Number(process.env.KEIL_IDE_PORT ?? 4870)
 const HOST = '127.0.0.1'
-const MAX_BODY = 4 * 1024 * 1024
+const MAX_BODY = 24 * 1024 * 1024
 const CHAT_TIMEOUT_MS = Number(process.env.KEIL_IDE_CHAT_TIMEOUT ?? 300000)
 /** Inline completion must fail fast: a late ghost text is worse than none. */
 const COMPLETE_TIMEOUT_MS = Number(process.env.KEIL_IDE_INLINE_TIMEOUT ?? 8000)
@@ -554,6 +554,63 @@ function outputCap(ai) {
   if (Number(ai.maxOutputTokens) > 0) return Number(ai.maxOutputTokens)
   if (Number(ai.maxTokens) > 0) return Number(ai.maxTokens)
   return 0
+}
+
+/** Types accepted as inline images. SVG is refused on purpose: it can carry script. */
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
+const MAX_IMAGES = 4
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+/** Magic-byte check — a `.png` name with JPEG bytes is refused, not forwarded. */
+function looksLikeImage(buffer, mime) {
+  if (buffer.length < 12) return false
+  if (mime === 'image/png') return buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47
+  if (mime === 'image/jpeg') return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff
+  if (mime === 'image/gif') return buffer.toString('ascii', 0, 6) === 'GIF87a' || buffer.toString('ascii', 0, 6) === 'GIF89a'
+  if (mime === 'image/webp') return buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP'
+  return false
+}
+
+/**
+ * Attach inline images to the last user message as OpenAI `image_url` parts.
+ *
+ * Mirrors the reference adapter where this protocol allows it: a text descriptor
+ * before every image (so the model can refer to "图片 2" and knows the exact size
+ * and type we sent), a per-image byte budget, and magic-byte validation instead of
+ * trusting the browser's mime string. Returns an error sentence for a 400, or ''.
+ */
+function attachImages(messages, images) {
+  if (!Array.isArray(images) || !images.length) return ''
+  if (images.length > MAX_IMAGES) return `一次最多 ${MAX_IMAGES} 张图片`
+  const prepared = []
+  for (const [index, image] of images.entries()) {
+    const mime = String(image?.mime ?? '').toLowerCase()
+    if (!IMAGE_TYPES.has(mime)) return `第 ${index + 1} 张图片类型不支持: ${mime || '(空)'}`
+    const buffer = Buffer.from(String(image?.data ?? ''), 'base64')
+    if (!buffer.length) return `第 ${index + 1} 张图片是空的`
+    if (buffer.length > MAX_IMAGE_BYTES) return `第 ${index + 1} 张图片超过 5 MB`
+    if (!looksLikeImage(buffer, mime)) return `第 ${index + 1} 张图片内容与类型不符`
+    prepared.push({
+      mime,
+      bytes: buffer.length,
+      width: Number(image.width) || 0,
+      height: Number(image.height) || 0,
+      name: String(image.name ?? '').slice(0, 80),
+      data: buffer.toString('base64'),
+    })
+  }
+  const parts = []
+  prepared.forEach((image, index) => {
+    const size = image.width && image.height ? `${image.width}×${image.height}` : '尺寸未知'
+    parts.push({
+      type: 'text',
+      text: `图片 ${index + 1}${image.name ? `：${image.name}` : ''}（${size}，${image.mime}，约 ${Math.round(image.bytes / 1024)} KB）`,
+    })
+    parts.push({ type: 'image_url', image_url: { url: `data:${image.mime};base64,${image.data}` } })
+  })
+  const user = messages[messages.length - 1]
+  user.content = [{ type: 'text', text: user.content }, ...parts]
+  return ''
 }
 
 /**
@@ -2342,6 +2399,11 @@ async function handleApi(req, res, url) {
       { role: 'system', content: [C51_SYSTEM_PROMPT, skillBlock].filter(Boolean).join('\n\n') },
       { role: 'user', content: [context, prompt].filter(Boolean).join('\n\n') },
     ]
+    // Inline images (base64 data URLs on the OpenAI-compatible `image_url` part).
+    // The reference adapter's rules are kept where this protocol allows them:
+    // a byte budget, magic-byte validation, and a text descriptor before each image.
+    const imageError = attachImages(messages, body.images)
+    if (imageError) return sendJson(res, 400, { error: imageError })
     // The UI asks for text/event-stream to render tokens as they arrive; plain
     // callers (no Accept header) get one JSON response instead.
     // Token metering: price the surface being sent, then anchor on the provider's

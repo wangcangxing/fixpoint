@@ -22,9 +22,15 @@ let lastRequest = null
 /** The canned assistant answer used for every request. */
 function cannedAnswer(body) {
   const userMessages = (body.messages ?? []).filter((message) => message.role === 'user')
-  const lastUser = userMessages.at(-1)?.content ?? ''
+  const raw = userMessages.at(-1)?.content ?? ''
+  // Multimodal messages are an array of parts: count text as text and images as
+  // images, so a test can assert what actually reached the wire.
+  const lastUser = Array.isArray(raw)
+    ? raw.filter((part) => part?.type === 'text').map((part) => String(part.text ?? '')).join('\n')
+    : String(raw)
+  const images = Array.isArray(raw) ? raw.filter((part) => part?.type === 'image_url') : []
   return [
-    `[mock] 收到 ${body.messages?.length ?? 0} 条消息，model=${body.model ?? '(none)'}，最后一条用户消息 ${lastUser.length} 字符。`,
+    `[mock] 收到 ${body.messages?.length ?? 0} 条消息，model=${body.model ?? '(none)'}，图片 ${images.length} 张，最后一条用户消息 ${lastUser.length} 字符。`,
     '',
     '建议把 LED 闪烁写成这样：',
     '',

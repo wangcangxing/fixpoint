@@ -97,9 +97,12 @@
           <span id="preset-hint" class="dim"></span>
         </div>
         <textarea id="prompt" rows="4" placeholder="例如：这个呼吸灯为什么看不出渐变？帮我改成分段亮度（也可以用 /技能名 开头）"></textarea>
+        <div id="chat-images" class="chat-images hidden"></div>
         </div>
         <div class="chat-actions">
         <div class="row">
+          <button id="btn-attach-image" class="tiny" title="添加图片（也可以直接粘贴或拖进这个面板）">图片</button>
+          <input id="chat-image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
           <label><input type="checkbox" id="ctx-file" checked /> 附带当前文件</label>
           <label><input type="checkbox" id="ctx-errors" checked /> 附带编译错误</label>
           <span class="spacer"></span>

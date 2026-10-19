@@ -14,6 +14,7 @@ const state = {
   activeModelId: '', // which of them the settings dialog is editing
   chatModels: [], // settings.models as the chat picker sees them (no edit buffer)
   chatModelId: '', // the model chat/completion actually run on
+  chatImages: [], // pending inline images: { id, name, mime, width, height, dataUrl, bytes }
   info: null, // readProjectInfo() result: projectDir, device, declaredSources, hexPath…
   sources: null, // { declared, onDisk, orphans, headers }
   hex: null, // { exists, path, bytes, mtime, enabled }
@@ -636,6 +637,99 @@ async function pickChatEffort(effort) {
   closeChatModelMenu()
 }
 
+/* ---------- inline image attachments ---------- */
+
+/** Limits borrowed from the reference adapter's image policy (inline-data-URL form). */
+const IMAGE_MAX_EDGE = 1600 // px on the long side, before upload
+const IMAGE_MAX_BYTES = 2 * 1024 * 1024 // per image, after recompression
+const IMAGE_MAX_COUNT = 4
+
+/** Downscale + recompress ONE file into a data URL that is small enough to inline. */
+async function prepareImage(file) {
+  const bitmap = await createImageBitmap(file)
+  const scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(bitmap.width, bitmap.height))
+  const width = Math.max(1, Math.round(bitmap.width * scale))
+  const height = Math.max(1, Math.round(bitmap.height * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  canvas.getContext('2d').drawImage(bitmap, 0, 0, width, height)
+  bitmap.close?.()
+  // Transparent sources keep WebP, everything else is cheaper as JPEG. Walk the
+  // quality ladder until it fits — the same idea as the reference adapter's
+  // WebP/JPEG choice and 85/75/60 steps.
+  const keepAlpha = /png|webp|gif/i.test(file.type)
+  let dataUrl = ''
+  for (const quality of [0.85, 0.75, 0.6]) {
+    dataUrl = canvas.toDataURL(keepAlpha ? 'image/webp' : 'image/jpeg', quality)
+    if (dataUrl.length * 0.75 <= IMAGE_MAX_BYTES) break
+  }
+  const mime = dataUrl.slice(5, dataUrl.indexOf(';'))
+  return {
+    id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    name: file.name || '粘贴的图片',
+    mime,
+    width,
+    height,
+    dataUrl,
+    bytes: Math.round(dataUrl.length * 0.75),
+  }
+}
+
+async function addChatImages(files) {
+  const list = [...files].filter((file) => /^image\//i.test(file.type))
+  if (!list.length) return
+  const room = IMAGE_MAX_COUNT - state.chatImages.length
+  if (room <= 0) {
+    appendMessage('err', '图片', `一次最多 ${IMAGE_MAX_COUNT} 张图片`)
+    return
+  }
+  const added = []
+  for (const file of list.slice(0, room)) {
+    const prepared = await prepareImage(file).catch(() => undefined)
+    if (prepared) added.push(prepared)
+  }
+  if (!added.length) {
+    appendMessage('err', '图片', '这张图读不出来（格式不支持或文件损坏）')
+    return
+  }
+  state.chatImages = [...state.chatImages, ...added]
+  renderChatImages()
+}
+
+function renderChatImages() {
+  const host = $('chat-images')
+  if (!host) return
+  host.textContent = ''
+  host.classList.toggle('hidden', !state.chatImages.length)
+  for (const image of state.chatImages) {
+    const chip = document.createElement('div')
+    chip.className = 'chip-img'
+    chip.title = `${image.name} · ${image.width}×${image.height} · ${Math.round(image.bytes / 1024)} KB`
+    const thumb = document.createElement('img')
+    thumb.src = image.dataUrl
+    thumb.alt = image.name
+    const label = document.createElement('span')
+    label.textContent = `${image.name.length > 14 ? `${image.name.slice(0, 12)}…` : image.name} ${image.width}×${image.height}`
+    const remove = document.createElement('button')
+    remove.textContent = '×'
+    remove.title = '移除这张图片'
+    remove.onclick = () => {
+      state.chatImages = state.chatImages.filter((item) => item.id !== image.id)
+      renderChatImages()
+    }
+    chip.append(thumb, label, remove)
+    host.appendChild(chip)
+  }
+  // The catalogue flag is advisory: warn, never block (gateways lie about it).
+  if (state.chatImages.length && chatModelEntry()?.supportsImages !== true) {
+    const warn = document.createElement('div')
+    warn.className = 'chip-img warn'
+    warn.textContent = '当前模型未标注支持图片；如果上游报错，请在设置里换成视觉模型'
+    host.appendChild(warn)
+  }
+}
+
 /* ---------- project + file operations ---------- */
 
 async function loadProject(project, { keepFile = false } = {}) {
@@ -763,6 +857,7 @@ function describeAttachments() {
     const items = [...(state.lastBuild.value.errors ?? []), ...(state.lastBuild.value.warnings ?? [])]
     if (items.length) bits.push(`编译信息 ${items.length} 条`)
   }
+  if (state.chatImages.length) bits.push(`图片 ${state.chatImages.length} 张`)
   return bits.length ? `（已附带：${bits.join(' · ')}）` : ''
 }
 
@@ -863,6 +958,14 @@ async function send() {
   }
   const prompt = buildPrompt(userText)
   if (!prompt) return
+  // Snapshot the pending images: the request needs the raw base64 (no data: prefix).
+  const images = state.chatImages.map((image) => ({
+    name: image.name,
+    mime: image.mime,
+    width: image.width,
+    height: image.height,
+    data: image.dataUrl.slice(image.dataUrl.indexOf(',') + 1),
+  }))
   const skillTag = skill ? `（技能: ${skill}）` : ''
   // Show the user's OWN words (plus a one-line note about what was attached).
   // Pasting the whole attached file into the transcript was the complaint:
@@ -878,9 +981,13 @@ async function send() {
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
-      body: JSON.stringify({ prompt, project: state.settings.project, skill }),
+      body: JSON.stringify({ prompt, project: state.settings.project, skill, images }),
     })
     const type = response.headers.get('content-type') ?? ''
+    // The request already carries them; clear the composer so the next message does
+    // not silently re-send the same images (and the chips match the pending state).
+    state.chatImages = []
+    renderChatImages()
 
     // Streaming path (OpenAI-compatible backend): render tokens as they arrive.
     if (type.includes('text/event-stream')) {
@@ -3109,6 +3216,32 @@ async function boot() {
   $('btn-build').onclick = () => build('build')
   $('btn-rebuild').onclick = () => build('rebuild')
   $('btn-send').onclick = send
+  // Inline images: picker, paste into the box, or drag onto the whole AI panel.
+  $('btn-attach-image').onclick = () => $('chat-image-input').click()
+  $('chat-image-input').onchange = () => {
+    addChatImages($('chat-image-input').files)
+    $('chat-image-input').value = ''
+  }
+  $('prompt').addEventListener('paste', (event) => {
+    const files = [...(event.clipboardData?.files ?? [])].filter((file) => file.type.startsWith('image/'))
+    if (!files.length) return
+    event.preventDefault()
+    addChatImages(files)
+  })
+  const chatPane = $('pane-chat')
+  chatPane.addEventListener('dragover', (event) => {
+    if (![...(event.dataTransfer?.items ?? [])].some((item) => item.kind === 'file' && item.type.startsWith('image/'))) return
+    event.preventDefault()
+    chatPane.classList.add('drag-over')
+  })
+  chatPane.addEventListener('dragleave', () => chatPane.classList.remove('drag-over'))
+  chatPane.addEventListener('drop', (event) => {
+    const files = [...(event.dataTransfer?.files ?? [])].filter((file) => file.type.startsWith('image/'))
+    if (!files.length) return
+    event.preventDefault()
+    chatPane.classList.remove('drag-over')
+    addChatImages(files)
+  })
   $('btn-model-picker').onclick = (event) => {
     event.stopPropagation()
     if ($('model-menu').classList.contains('hidden')) openChatModelMenu()

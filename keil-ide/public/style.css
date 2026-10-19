@@ -354,6 +354,24 @@ body.resizing-v { cursor: row-resize; user-select: none; }
   font: 11px/1.5 monospace;
 }
 .chat textarea { margin: 0 8px; width: calc(100% - 16px); resize: vertical; }
+/* Inline image chips (paste / drag / picker). The thumbnail is the preview; the
+   label keeps the encoded size visible so nobody wonders why a request is big. */
+.chat-images { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 8px; }
+.chat-images .chip-img {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #1b1e24;
+  color: var(--dim);
+  font-size: 11px;
+}
+.chat-images .chip-img img { width: 34px; height: 34px; object-fit: cover; border-radius: 3px; }
+.chat-images .chip-img button { padding: 0 4px; font-size: 12px; line-height: 1; }
+.chat-images .chip-img.warn { border-color: var(--warn); color: var(--warn); }
+.chat.drag-over { outline: 2px dashed var(--accent); outline-offset: -2px; }
 .chat .row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-size: 12px; flex-wrap: wrap; }
 .chat .row label { white-space: nowrap; }
 .chat .row button { flex: 0 0 auto; white-space: nowrap; }

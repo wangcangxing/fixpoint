@@ -20,8 +20,9 @@
  * Stated plainly: DSH replays a durable event log and needs an O(1) projection
  * fold plus a shadow-price protocol. Our "log" is this IDE's HTTP call history,
  * so this is a faithful-in-semantics but simpler fold. Route pricing is a small
- * editable table (per 1M tokens) rather than adapter metadata, and image pricing
- * is not implemented because this IDE never sends images.
+ * editable table (per 1M tokens) rather than adapter metadata. Inline images are
+ * charged as a `[image]` placeholder per part, not by their base64 length — the
+ * provider's reported usage remains the authority.
  *
  * @module keil-tokens
  */
@@ -40,7 +41,17 @@ export const ROLE_FRAMING_TOKENS = 4
 
 /** Heuristic price of one model-visible message, independent of any route. */
 export function estimateMessageTokens(message, framing = ROLE_FRAMING_TOKENS) {
-  const content = typeof message?.content === 'string' ? message.content : JSON.stringify(message?.content ?? '')
+  // Multimodal content is an array of parts. Stringifying it would read the base64
+  // data URL as thousands of "tokens", so count the text parts and charge one
+  // placeholder per image instead.
+  const content = Array.isArray(message?.content)
+    ? message.content
+        .map((part) => (part?.type === 'image_url' ? '[image]' : typeof part?.text === 'string' ? part.text : ''))
+        .filter(Boolean)
+        .join('\n')
+    : typeof message?.content === 'string'
+      ? message.content
+      : JSON.stringify(message?.content ?? '')
   return estimateTokens(content) + framing
 }
 
