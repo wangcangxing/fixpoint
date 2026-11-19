@@ -47,6 +47,8 @@ import {
   renderSkillBlock,
 } from '../keil-skills.mjs'
 import { DEFAULT_PRICING, TokenMeter } from '../keil-tokens.mjs'
+import { composeUserContent, pickAutoSkill } from '../keil-skill-inject.mjs'
+import { STCGAL_BAUDS, STCGAL_PROTOCOLS, discoverStcgal, listSerialPorts, startStcgalFlash } from '../keil-flash.mjs'
 import { installSkill, uninstallSkill } from '../keil-skill-install.mjs'
 import { DEFAULT_DEVICE, c51ProjectXml, parseWorkspace, starterSource, workspaceXml } from '../keil-project.mjs'
 
@@ -167,6 +169,12 @@ const run = makeNodeRunner()
 const chatMeter = new TokenMeter()
 const completeMeter = new TokenMeter()
 
+// At most one flash at a time: Windows serial ports are exclusive (a second
+// process opening the same COM fails with EBUSY), so a concurrent stcgal would
+// corrupt both sessions. The UI consumes one SSE stream and cancels via
+// /api/flash/cancel; `done` always clears this handle, including on error.
+let activeFlash = null
+
 /**
  * First-run seed. Deliberately machine-independent: an earlier version seeded the
  * author's own `E:\单片机\作业2\C program.uvproj`, so EVERY other install opened a
@@ -225,10 +233,13 @@ const DEFAULT_SETTINGS = {
   },
   // Skills: extra directories, the description budget. `sharedDsh: true` is an
   // explicit opt-in to also scan another agent's roots; the IDE ships isolated.
+  // `autoInject: true` = pick a `modelInvocable` skill from the message text and
+  // prepend it to the user turn silently (the composer keeps the user's words).
   skills: {
     dirs: [],
     descriptionMaxLength: 500,
     sharedDsh: false,
+    autoInject: true,
   },
   // Backups before every write. `dir` empty = "<project>/.backups". The backup
   // folder is its OWN write root: it may deliberately live outside the project.
@@ -239,6 +250,16 @@ const DEFAULT_SETTINGS = {
   // Preset prompts: `file` points at an extra (external) preset file.
   prompts: {
     file: '',
+  },
+  // STC ISP flashing through the user's own stcgal. `python` empty = auto-discover
+  // (KEIL_PYTHON → known roots → PATH). Nothing flashes by itself: only the
+  // explicit 烧录 button reaches /api/flash/start.
+  flash: {
+    python: '',
+    port: '',
+    baud: 115200,
+    protocol: 'auto',
+    autoreset: false,
   },
   // Follow files changed by another editor (or by git) while this window is open.
   sync: {
@@ -293,7 +314,7 @@ async function loadSettings() {
 async function saveSettings(patch) {
   const current = await loadSettings()
   const next = { ...current, ...patch }
-  for (const group of ['ai', 'editor', 'skills', 'backup', 'sync', 'prompts']) {
+  for (const group of ['ai', 'editor', 'skills', 'backup', 'sync', 'prompts', 'flash']) {
     if (patch[group] && typeof patch[group] === 'object') {
       next[group] = { ...(current[group] ?? {}), ...patch[group] }
     }
@@ -447,6 +468,51 @@ async function listSkills(projectDir, skillConfig = {}) {
     // for the explicit install step).
     includeSharedRoots: skillConfig.sharedDsh === true,
   })
+}
+
+/**
+ * Resolve the skill for ONE chat turn, and say where it goes: the caller splices
+ * `block` into the head of the user message (never the system prompt, never the
+ * composer — see ../keil-skill-inject.mjs for why).
+ *
+ * Two sources, one result:
+ *   - `requested` (the picker, or a `/skill-name` the UI already stripped) wins,
+ *     and its invocation policy is enforced here (403 for the wrong surface);
+ *   - otherwise, with `autoInject` on, the best-scoring `modelInvocable` skill.
+ *
+ * An auto-pick whose file went stale is dropped silently: a background guess must
+ * never turn a normal question into an error.
+ */
+async function resolveChatSkill({ requested, surface = 'user', prompt, projectDir, skillConfig = {}, autoInject = true }) {
+  const registry = await listSkills(projectDir, skillConfig)
+  const wanted = String(requested ?? '').trim().toLowerCase()
+  let candidate = null
+  let auto = false
+
+  if (wanted) {
+    const summary = registry.skills.find((item) => item.name.toLowerCase() === wanted)
+    if (!summary) return { error: `找不到技能: ${requested}`, code: 404 }
+    const allowed = surface === 'model' ? isModelInvocable(summary) : isUserInvocable(summary)
+    if (!allowed) {
+      return { error: `技能 ${summary.name} 不允许由${surface === 'model' ? '模型' : '用户'}调用`, code: 403 }
+    }
+    candidate = summary
+  } else if (autoInject !== false) {
+    const picked = pickAutoSkill(registry.skills, prompt)
+    if (picked) {
+      candidate = picked.skill
+      auto = true
+    }
+  }
+  if (!candidate) return { block: '', name: '', auto: false }
+
+  // Fresh body every time, revalidated against the candidate taken from the catalog.
+  const loaded = await loadSkill(candidate.name, { candidate })
+  if (loaded.error) {
+    if (auto) return { block: '', name: '', auto: false }
+    return { error: loaded.error, code: loaded.code ?? 500 }
+  }
+  return { block: renderSkillBlock(loaded.skill), name: loaded.skill.name, auto }
 }
 
 /** How many model entries the settings dialog may keep (it is a dropdown, not a DB). */
@@ -2359,45 +2425,38 @@ async function handleApi(req, res, url) {
     if (!prompt) return sendJson(res, 400, { error: 'prompt is required' })
     const project = body.project || settings.project
     const ai = effectiveAi(settings)
+    const info = project ? await readProjectInfo(project).catch(() => undefined) : undefined
+    const skillConfig = settings.skills ?? {}
+
+    // SILENT INJECTION: the skill is resolved here, on the server, and rides at the
+    // head of the USER turn. The browser sends only what the user typed, so the
+    // composer and the transcript never contain skill text or a skill marker.
+    const skill = await resolveChatSkill({
+      requested: body.skill,
+      surface: body.skillInvocation === 'model' ? 'model' : 'user',
+      prompt,
+      projectDir: info?.projectDir,
+      skillConfig,
+      autoInject: skillConfig.autoInject !== false,
+    })
+    if (skill.error) return sendJson(res, skill.code ?? 500, { error: skill.error })
 
     if (ai.mode === 'dsh') {
       const toolchain = await inspectToolchain(run).catch(() => undefined)
-      const info = project ? await readProjectInfo(project).catch(() => undefined) : undefined
-      const result = await runAgent(agentPrompt({ prompt, project, toolchain }), info?.projectDir ?? here, undefined)
-      return sendJson(res, 200, result)
+      const result = await runAgent(
+        agentPrompt({ prompt: composeUserContent({ skillBlock: skill.block, prompt }), project, toolchain }),
+        info?.projectDir ?? here,
+        undefined,
+      )
+      return sendJson(res, 200, { ...result, skill: skill.name, skillAuto: skill.auto })
     }
 
     const context = [await projectContext(project), await deviceLibraryContext(project, prompt)]
       .filter(Boolean)
       .join('\n\n')
-    // An explicitly chosen skill is injected as extra system instructions.
-    let skillBlock = ''
-    let skillName = ''
-    if (typeof body.skill === 'string' && body.skill.trim()) {
-      const info = project ? await readProjectInfo(project).catch(() => undefined) : undefined
-      const registry = await listSkills(info?.projectDir, settings.skills)
-      const wanted = body.skill.trim().toLowerCase()
-      const summary = registry.skills.find((item) => item.name.toLowerCase() === wanted)
-      if (!summary) return sendJson(res, 404, { error: `找不到技能: ${body.skill}` })
-      // The operational boundary: a human-picked skill needs userInvocable, a
-      // model-selected one needs modelInvocable (DSH's policy split).
-      const surface = body.skillInvocation === 'model' ? 'model' : 'user'
-      const allowed = surface === 'model' ? isModelInvocable(summary) : isUserInvocable(summary)
-      if (!allowed) {
-        return sendJson(res, 403, {
-          error: `技能 ${summary.name} 不允许由${surface === 'model' ? '模型' : '用户'}调用`,
-        })
-      }
-      // Load the body FRESH and revalidate the name against the stored candidate:
-      // editing a skill takes effect on the next use, renaming it is reported.
-      const loaded = await loadSkill(summary.name, { candidate: summary })
-      if (loaded.error) return sendJson(res, loaded.code ?? 500, { error: loaded.error })
-      skillName = loaded.skill.name
-      skillBlock = renderSkillBlock(loaded.skill)
-    }
     const messages = [
-      { role: 'system', content: [C51_SYSTEM_PROMPT, skillBlock].filter(Boolean).join('\n\n') },
-      { role: 'user', content: [context, prompt].filter(Boolean).join('\n\n') },
+      { role: 'system', content: C51_SYSTEM_PROMPT },
+      { role: 'user', content: composeUserContent({ skillBlock: skill.block, context, prompt }) },
     ]
     // Inline images (base64 data URLs on the OpenAI-compatible `image_url` part).
     // The reference adapter's rules are kept where this protocol allows them:
@@ -2423,7 +2482,85 @@ async function handleApi(req, res, url) {
     }
     const result = await chatOnce(ai, messages)
     if (result.usage) chatMeter.observeUsage(result.usage)
-    return sendJson(res, 200, { ...result, mode: 'openai', skill: skillName })
+    return sendJson(res, 200, { ...result, mode: 'openai', skill: skill.name, skillAuto: skill.auto })
+  }
+
+  /* ---------- STC ISP flashing (never automatic: only the 烧录 button gets here) ---------- */
+
+  if (url.pathname === '/api/flash/status') {
+    const probe = await discoverStcgal(run, settings.flash?.python ?? '')
+    const ports = await listSerialPorts(run)
+    return sendJson(res, 200, {
+      ...probe,
+      ports,
+      busy: Boolean(activeFlash),
+      flash: settings.flash ?? {},
+      protocols: STCGAL_PROTOCOLS,
+      bauds: STCGAL_BAUDS,
+    })
+  }
+
+  if (url.pathname === '/api/flash/cancel') {
+    const had = Boolean(activeFlash)
+    if (activeFlash) activeFlash.cancel()
+    // Do NOT end the SSE here: `done` still arrives on the open stream with
+    // cancelled:true, which is how the UI learns the flash actually stopped.
+    return sendJson(res, 200, { cancelled: had })
+  }
+
+  if (url.pathname === '/api/flash/start') {
+    if (activeFlash) return sendJson(res, 409, { error: '已有烧录任务在运行' })
+    const body = await readBody(req)
+    const project = body.project || settings.project
+    const cfg = settings.flash ?? {}
+    let filePath = typeof body.filePath === 'string' ? body.filePath.trim() : ''
+    if (!filePath) {
+      const info = project ? await readProjectInfo(project).catch(() => undefined) : undefined
+      if (!info?.hexPath || !info.createHexFile) {
+        return sendJson(res, 400, {
+          error: '当前工程没有生成 hex：请在 Keil 工程选项里勾选 Create Hex File 并重新编译，或直接指定固件文件',
+        })
+      }
+      if (!(await statOrNull(info.hexPath))) {
+        return sendJson(res, 400, { error: `找不到 hex 文件：${info.hexPath}（请先编译，或勾选 Create Hex File）` })
+      }
+      filePath = info.hexPath
+    }
+    const port = String(body.port || cfg.port || '').trim()
+    if (!port) return sendJson(res, 400, { error: '未选择串口（COM口）' })
+    const probe = await discoverStcgal(run, cfg.python ?? '')
+    if (!probe.python) return sendJson(res, 400, { error: probe.error || '找不到可用的 Python / stcgal' })
+
+    const baud = Number(body.baud ?? cfg.baud ?? 115200) || 115200
+    const protocol = String(body.protocol || cfg.protocol || 'auto')
+    const autoreset = body.autoreset === undefined ? cfg.autoreset === true : body.autoreset === true
+    // Persist only the choices, never the discovered python path (it is machine data).
+    await saveSettings({ flash: { port, baud, protocol, autoreset } }).catch(() => undefined)
+
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+    })
+    const frame = (payload) => res.write(`data: ${JSON.stringify(payload)}\n\n`)
+    const task = startStcgalFlash({
+      python: probe.python,
+      port,
+      filePath,
+      baud,
+      protocol,
+      autoreset,
+      send(event) {
+        if (event.kind === 'status') frame({ status: event.status })
+        else if (event.kind === 'progress') frame({ progress: { percent: event.percent, detail: event.detail } })
+        else if (event.kind === 'log') frame({ log: event.text })
+      },
+    })
+    activeFlash = task
+    const outcome = await task.done
+    activeFlash = null
+    frame({ done: outcome })
+    return res.end()
   }
 
   return sendJson(res, 404, { error: `unknown api route: ${url.pathname}` })

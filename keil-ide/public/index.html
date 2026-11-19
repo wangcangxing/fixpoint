@@ -19,6 +19,7 @@
       <select id="project" title="选择工程"></select>
       <button id="btn-build" class="primary">编译 <kbd>F7</kbd></button>
       <button id="btn-rebuild">重编</button>
+      <button id="btn-flash" title="通过 stcgal 经串口 ISP 烧录当前工程的 hex（STC 51，需断电上电冷启动握手）">烧录</button>
       <span id="hex-chip" class="chip">hex: —</span>
       <span id="device-chip" class="chip">—</span>
       <span id="toolchain-chip" class="chip dim">工具链: 检查中…</span>
@@ -85,10 +86,14 @@
         <div id="transcript"></div>
         <div class="splitter-h" id="split-reply" title="上下拖动调整回复区高度（双击复位）"></div>
         <div class="chat-controls">
+        <!-- Only the skill/preset rows scroll away when the reply area is dragged
+             tall. The composer itself sits OUTSIDE that scroller: at the old
+             layout it was the last child of it and got clipped by the scroller on
+             a narrow window, so the panel showed "发送" but no input box. -->
         <div class="chat-controls-scroll">
         <div class="row">
           <label for="skill">技能</label>
-          <select id="skill"><option value="">（不用技能）</option></select>
+          <select id="skill"><option value="">（自动匹配）</option></select>
           <span id="skill-hint" class="dim"></span>
         </div>
         <div class="row">
@@ -96,9 +101,9 @@
           <select id="preset"><option value="">（选一条预设提示词，填进下面的输入框）</option></select>
           <span id="preset-hint" class="dim"></span>
         </div>
-        <textarea id="prompt" rows="4" placeholder="例如：这个呼吸灯为什么看不出渐变？帮我改成分段亮度（也可以用 /技能名 开头）"></textarea>
-        <div id="chat-images" class="chat-images hidden"></div>
         </div>
+        <textarea id="prompt" rows="4" placeholder="例如：这个呼吸灯为什么看不出渐变？帮我改成分段亮度（技能会按问题内容自动挑，不用写进这里）"></textarea>
+        <div id="chat-images" class="chat-images hidden"></div>
         <div class="chat-actions">
         <div class="row">
           <button id="btn-attach-image" class="tiny" title="添加图片（也可以直接粘贴或拖进这个面板）">图片</button>
@@ -125,6 +130,43 @@
       <div class="pane-title">问题 <span id="problem-count" class="dim"></span></div>
       <ul id="problems"></ul>
     </footer>
+
+    <!-- STC ISP flash dialog. It is the ONLY way to reach /api/flash/start —
+         nothing in the app flashes on its own. Closing this box does not cancel
+         a running task (the server keeps it); reopening shows a busy warning. -->
+    <div id="flash-modal" class="modal hidden">
+      <div class="modal-box">
+        <div class="settings-head">
+          <h3>烧录（STC ISP）</h3>
+          <span id="flash-engine" class="chip dim">引擎: 检查中…</span>
+          <span class="spacer"></span>
+          <button id="btn-flash-close">关闭</button>
+        </div>
+        <div id="flash-tip" class="hint">点击「开始烧录」后，请给单片机<b>断电再上电</b>（冷启动）以触发 ISP 握手。本功能只面向 STC / 8051；<b>不要把 5V 串口直连 3.3V 芯片</b>。</div>
+        <div class="modal-row">
+          <label class="field"><span>COM 口</span><select id="flash-port"></select></label>
+          <button id="btn-flash-ports" class="tiny" title="重新扫描串口">刷新</button>
+          <label class="field"><span>波特率</span><select id="flash-baud"></select></label>
+          <label class="field"><span>协议</span><select id="flash-protocol"></select></label>
+        </div>
+        <label class="field">
+          <span><input type="checkbox" id="flash-autoreset" /> 自动复位（DTR，支持板卡免手动断电）</span>
+        </label>
+        <div class="modal-row">
+          <span id="flash-status" class="dim">准备就绪</span>
+          <span class="spacer"></span>
+          <span id="flash-percent" class="dim">0%</span>
+        </div>
+        <div id="flash-progress" class="flash-bar"><div id="flash-bar-fill" class="flash-bar-fill"></div></div>
+        <pre id="flash-log" class="status">等待选择固件与串口…</pre>
+        <div class="modal-row">
+          <button id="btn-flash-start" class="primary">开始烧录</button>
+          <button id="btn-flash-cancel" disabled>中止</button>
+          <span class="spacer"></span>
+          <span id="flash-hint" class="dim">使用当前工程的 hex；引擎来自你本机的 stcgal</span>
+        </div>
+      </div>
+    </div>
 
     <!-- NOTE: the chat textarea above is `#prompt`, so this dialog must NOT reuse
          that id — a duplicate id made getElementById find the textarea and the
@@ -205,6 +247,7 @@
             <button class="tab" data-tab="presets">预设提示词</button>
           <button class="tab" data-tab="files">文件</button>
           <button class="tab" data-tab="skills">技能</button>
+          <button class="tab" data-tab="flash">烧录</button>
             <button class="tab" data-tab="about">诊断 / 关于</button>
           </nav>
           <div class="settings-panes">
@@ -435,6 +478,14 @@
 
         <section class="pane-tab" data-pane="skills">
           <label class="field">
+            <span>按问题内容自动注入技能</span>
+            <input type="checkbox" id="skills-auto-inject" />
+          </label>
+          <p class="hint">
+            <b>默认开启</b>：发送时由服务端按问题内容挑最匹配的技能，把技能正文<b>静默</b>放到这条消息的最前面，
+            输入框里永远只有你打的字。上面下拉里点名了技能时以点名为准；两者都不会在对话里显示技能标记。
+          </p>
+          <label class="field">
             <span>共享其他 agent 的技能目录</span>
             <input type="checkbox" id="skills-shared-dsh" />
           </label>
@@ -475,6 +526,18 @@
             <button id="btn-reload-skills">重新扫描</button>
           </div>
           <pre id="skills-roots" class="status"></pre>
+        </section>
+
+        <section class="pane-tab" data-pane="flash">
+          <label class="field">
+            <span>Python 路径（留空 = 自动发现）</span>
+            <input type="text" id="flash-python" placeholder="留空：KEIL_PYTHON → D:\\Python312 → PATH" />
+          </label>
+          <p class="hint">
+            烧录引擎是你本机的 <code>stcgal</code>（用 <code>pip install stcgal</code> 安装），本软件<b>不内置、不下载</b>任何烧录器。
+            留空会按顺序找 <code>KEIL_PYTHON</code> 环境变量、常见 Python 安装目录、PATH；找到后会在「烧录」弹层显示引擎版本。
+            烧录只从工具栏的「烧录」按钮发起，本软件<b>绝不自动烧录</b>。
+          </p>
         </section>
 
         <section class="pane-tab" data-pane="about">

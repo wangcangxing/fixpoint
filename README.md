@@ -66,7 +66,7 @@ npx electron-builder@25 --prepackaged build/dist-packager/Fixpoint-win32-x64 `
 
 - **只支持 Windows**（原生对话框、注册表发现编译器、资源管理器定位都依赖 Windows）
 - 未做代码签名；未做自动更新
-- 无烧录能力（请自行用你的 ISP 工具烧 hex）
+- 烧录支持 **STC 8051 串口 ISP**（工具栏「烧录」，用你本机的 stcgal；详见 `keil-ide/README.md`）；STM32 与 UVSOCK 烧录未提供
 - 器件库读自你本机 Keil（本机为 2017 年版），**不含 STC / STC15 / N76E003**；这类芯片请选兼容的 `AT89C52`
 - **本仓库尚未选择开源许可证**：在补充许可证之前，默认保留所有权利，请勿直接复用代码。
 

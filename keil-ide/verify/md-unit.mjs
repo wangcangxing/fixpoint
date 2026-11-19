@@ -8,7 +8,13 @@
  * exactly the failure mode we saw in the app (the first CDP evaluate never returned
  * and the renderer stayed frozen).
  *
- * Usage: node verify/md-unit.mjs [fixtureFile]
+ * The sample is BUILT IN on purpose. It used to default to a text file on the
+ * author's desktop, so on any other machine (or after that file changed) four
+ * structural checks failed for reasons that had nothing to do with the renderer.
+ * An external file may still be passed as a second opinion: for it only the
+ * "must not hang / must not throw / must not leak raw markers" checks run.
+ *
+ * Usage: node verify/md-unit.mjs [extraSampleFile]
  */
 import { readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -16,11 +22,11 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const fixture = process.argv[2] ?? 'C:\\Users\\23106\\Desktop\\新建 文本文档 (13).txt'
+const extraArg = process.argv[2] ?? ''
 
-if (process.argv[2] !== '--child' && process.argv[3] !== '--child') {
+if (!process.argv.includes('--child')) {
   const started = Date.now()
-  const run = spawnSync(process.execPath, [fileURLToPath(import.meta.url), fixture, '--child'], {
+  const run = spawnSync(process.execPath, [fileURLToPath(import.meta.url), extraArg || '-', '--child'], {
     timeout: 20000,
     encoding: 'utf8',
   })
@@ -86,6 +92,16 @@ globalThis.document = {
 globalThis.state = { monaco: null }
 
 const source = readFileSync(join(here, '..', 'public', 'app.js'), 'utf8')
+
+/** Slice one top-level `function name(...) { … }` out of app.js. */
+function pickFunction(name) {
+  const at = source.indexOf(`\nfunction ${name}(`)
+  if (at < 0) throw new Error(`app.js 里找不到 ${name}()`)
+  const end = source.indexOf('\n}', at)
+  if (end < 0) throw new Error(`${name}() 找不到函数结尾`)
+  return source.slice(at + 1, end + 2)
+}
+
 const start = source.indexOf('/* ---------- tiny Markdown renderer')
 const end = source.indexOf('function appendMessage')
 if (start < 0 || end < 0) {
@@ -93,9 +109,13 @@ if (start < 0 || end < 0) {
   process.exit(1)
 }
 const rendererSource = source.slice(start, end)
+// The fenced-code branch of renderMarkdown() calls splitFileMarker(), which lives
+// AFTER appendMessage in app.js. Omitting it made every fenced-block sample throw
+// "splitFileMarker is not defined" — the test, not the renderer, was broken.
+const splitFileMarkerSource = pickFunction('splitFileMarker')
 // eslint-disable-next-line no-new-func
-const factory = new Function(`${rendererSource}; return { renderMarkdown, renderInline }`)
-const { renderMarkdown } = factory()
+const factory = new Function(`${splitFileMarkerSource}\n${rendererSource}; return { renderMarkdown, renderInline, splitFileMarker }`)
+const { renderMarkdown, splitFileMarker } = factory()
 
 let failed = 0
 const check = (name, actual, expected) => {
@@ -104,11 +124,32 @@ const check = (name, actual, expected) => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : `\n      got      ${JSON.stringify(actual)}\n      expected ${JSON.stringify(expected)}`}`)
 }
 
-const text = readFileSync(fixture, 'utf8')
-console.log(`样本: ${fixture}（${text.split('\n').length} 行，${text.length} 字符）`)
+// Built-in sample: every construct the renderer claims to support, including the
+// `FILE:` marker both outside and INSIDE a fence (models do both).
+const SAMPLE = [
+  '## 定时器初值',
+  '',
+  '说明文字，含 **加粗**、`inline code` 与 [链接](https://example.com)。',
+  '',
+  '- 第一项',
+  '- 第二项',
+  '- 第三项',
+  '- 第四项',
+  '',
+  'FILE: E:\\tese\\new\\main.c',
+  '',
+  '```c',
+  'FILE: E:\\tese\\new\\main.c',
+  '#include <reg51.h>',
+  'void main(void) { while (1) { } }',
+  '```',
+  '',
+  '> 引用一行',
+].join('\n')
+console.log(`内置样本: ${SAMPLE.split('\n').length} 行，${SAMPLE.length} 字符`)
 
 // 1) the whole document must terminate
-const fragment = renderMarkdown(text)
+const fragment = renderMarkdown(SAMPLE)
 check('整篇渲染完成（没有死循环）', fragment.childNodes.length > 0, true)
 
 // 2) it must not leave raw markdown markers behind
@@ -124,9 +165,21 @@ check('产生了列表项', fragment.querySelectorAll('li').length > 3, true)
 check('产生了代码块（<pre>）', fragment.querySelectorAll('pre').length > 0, true)
 check('产生了加粗', fragment.querySelectorAll('strong').length > 0, true)
 
-// 3b) CRLF input must render the same as LF input (the app receives both).
-const lf = renderMarkdown(text.replace(/\r\n?/g, '\n'))
-check('CRLF 与 LF 渲染出的结构一致', fragment.querySelectorAll('li').length === lf.querySelectorAll('li').length && fragment.querySelectorAll('pre').length === lf.querySelectorAll('pre').length, true)
+// 3b) a FILE: marker inside the fence is a target, never code
+const codeText = fragment.querySelectorAll('PRE').map((node) => node.textContent).join('\n')
+check('代码块里不含 FILE: 行', /FILE:/.test(codeText), false)
+check('代码块保留了真正的代码', codeText.includes('#include <reg51.h>'), true)
+check('splitFileMarker 剥掉首行 FILE: 并返回路径', splitFileMarker('FILE: E:\\a\\b.c\nint x;'), { code: 'int x;', file: 'E:\\a\\b.c' })
+check('splitFileMarker 对普通代码原样返回', splitFileMarker('int x;').file, '')
+
+// 3c) CRLF input must render the same as LF input (the app receives both).
+const lf = renderMarkdown(SAMPLE.replace(/\r\n?/g, '\n'))
+check(
+  'CRLF 与 LF 渲染出的结构一致',
+  fragment.querySelectorAll('li').length === lf.querySelectorAll('li').length &&
+    fragment.querySelectorAll('pre').length === lf.querySelectorAll('pre').length,
+  true,
+)
 
 // 4) pathological inputs must also terminate
 const nasty = [
@@ -152,6 +205,23 @@ for (const sample of nasty) {
   }
 }
 check('异常/边界输入都能终止且不抛异常', nastyOk, true)
+
+// 5) an optional external sample: only the "does not hang / does not throw" contract.
+const extra = extraArg && extraArg !== '-' ? extraArg : ''
+if (extra) {
+  const text = readFileSync(extra, 'utf8')
+  console.log(`外部样本: ${extra}（${text.split('\n').length} 行，${text.length} 字符）`)
+  let ok = true
+  try {
+    const out = renderMarkdown(text)
+    ok = out.childNodes.length > 0
+    renderMarkdown(text.replace(/\r\n?/g, '\n'))
+  } catch (error) {
+    ok = false
+    console.log(`      外部样本渲染失败: ${error.message}`)
+  }
+  check('外部样本能完整渲染、不抛异常', ok, true)
+}
 
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过')
 process.exit(failed ? 1 : 0)

@@ -24,6 +24,8 @@ const ENGINES = [
   'keil-symbols.mjs',
   'keil-completion.mjs',
   'keil-skills.mjs',
+  'keil-skill-inject.mjs',
+  'keil-flash.mjs',
   'keil-tokens.mjs',
   'keil-skill-install.mjs',
   'keil-project.mjs',

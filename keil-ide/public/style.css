@@ -207,8 +207,10 @@ main { flex: 1 1 auto; display: flex; min-height: 0; min-width: 0; overflow: hid
 .diff-stats .del { color: #ff7b72; }
 #diff-editor { flex: 1 1 auto; min-height: 0; }
 
-.chat { flex: 0 0 var(--chat-w, clamp(230px, 25vw, 360px)); display: flex; flex-direction: column; min-width: 0; }
-.chat-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; min-width: 0; }
+.chat { flex: 0 1 var(--chat-w, clamp(230px, 25vw, 360px)); display: flex; flex-direction: column; min-width: 0; }
+/* Clip, not expand: the reply area and the composer both live in here, and a pane
+   taller than its box used to push the composer past the window's bottom edge. */
+.chat-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; min-width: 0; overflow: hidden; }
 
 /* Minimised AI panel: a narrow vertical rail, not a closed panel. */
 .chat.minimized { flex: 0 0 42px; }
@@ -271,17 +273,35 @@ body.resizing { cursor: col-resize; user-select: none; }
 .splitter-h.dragging::after { top: 1px; height: 3px; background: #3a6fd8; }
 body.resizing-v { cursor: row-resize; user-select: none; }
 
-/* AI input block. When the reply area is drag-sized, the controls take the leftover
-   height: the scrollable part (skill/preset/textarea) shrinks and scrolls while the
-   send/apply row stays pinned at the bottom. */
-.chat-controls { display: flex; flex-direction: column; flex: 0 0 auto; min-height: 0; }
-.chat-controls-scroll { display: flex; flex-direction: column; flex: 0 0 auto; min-height: 0; }
+/* AI input block.
+   Layout rule: the composer is sized by its CONTENT and pinned to the bottom
+   (`margin-top: auto`), and the reply area is the only flexible part, capped by
+   `--reply-h` when the user dragged the splitter. Nothing here reserves a magic
+   height any more: the earlier `calc(100% - 210px)` clamped the reply area but left
+   the controls block one row short, so "对比并应用 AI 修改…" rendered half cut. */
+.chat-controls {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
+  /* Never squeezed by the reply area: this is the measured height of skill row +
+     textarea + button rows in a wide window (the observer in app.js raises the
+     published --composer-h when the rows wrap). */
+  min-height: 292px;
+  max-height: 100%;
+  overflow: hidden;
+  margin-top: auto;
+}
+/* Only the skill/preset rows may scroll away when the pane is very short. */
+.chat-controls-scroll { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow: auto; }
 .chat-actions { flex: 0 0 auto; }
-.chat.sized #transcript { flex: 0 0 var(--reply-h, 240px); }
-.chat.sized .chat-controls { flex: 1 1 auto; }
-.chat.sized .chat-controls-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
-.chat.sized .chat-controls-scroll textarea { flex: 1 1 auto; min-height: 64px; }
-#transcript { flex: 1 1 auto; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+/* The composer is a direct child of .chat-controls (outside the scroller), so the
+   textarea keeps its height no matter how small the controls block gets. */
+.chat-controls > textarea { flex: 0 0 auto; }
+/* Reply area: fixed to the dragged height, but never more than the pane leaves
+   after the composer. `--composer-h` is measured by app.js (syncComposerHeight) —
+   a CSS constant here is what clipped "对比并应用 AI 修改…" to half a button. */
+.chat.sized #transcript { flex: 0 0 var(--reply-h, 240px); max-height: calc(100% - var(--composer-h, 216px)); }
+#transcript { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
 .msg { border: 1px solid var(--line); border-radius: 5px; padding: 6px 8px; white-space: pre-wrap; word-break: break-word; }
 .msg.user { border-color: #3a63b0; background: #20293a; }
 .msg.ai { background: #1d2026; }
@@ -302,14 +322,23 @@ body.resizing-v { cursor: row-resize; user-select: none; }
   background: #16181c;
   border: 1px solid var(--line);
   border-radius: 4px;
-  overflow: auto;
-  max-height: 320px;
+  /* NO inner scrollbar and NO max-height: the answer is read by scrolling the
+     transcript, one surface only. With a 520px inner cap plus the transcript's own
+     scrollbar, the wheel landed in the code block and the rest of the answer (code
+     tail + the text after the block) could never be reached — "回答的下面没显示". */
+  overflow: visible;
+  max-height: none;
+  /* Wrap instead of clipping at the right edge. The pane can be 200px wide when the
+     window is small, and `white-space: pre` + a horizontal scrollbar meant half of
+     every long line was simply invisible in the transcript. */
+  white-space: pre-wrap;
+  word-break: break-word;
   /* The font belongs on `pre`, not only on `pre code`: after Monaco colourises a
      block its children are coloured <span>s, and a proportional font there would
      ruin the code alignment. */
   font: 12px/1.5 Consolas, "Courier New", monospace;
 }
-.msg .md pre code, .msg .md pre span, .msg .md pre div { font: inherit; white-space: pre; }
+.msg .md pre code, .msg .md pre span, .msg .md pre div { font: inherit; white-space: inherit; }
 .msg .md code {
   font: 12px/1.5 Consolas, "Courier New", monospace;
   background: #16181c;
@@ -535,6 +564,26 @@ body.resizing-v { cursor: row-resize; user-select: none; }
 .field textarea { width: 100%; resize: vertical; font: 12px/1.5 monospace; }
 #skills-roots, #about-doctor { max-height: 140px; margin: 0; }
 .modal-box > .modal-row { flex: 0 0 auto; }
+
+/* STC ISP flash dialog — reuses .modal/.modal-box; only its own widgets live here. */
+#flash-modal .modal-row .field { flex: 1 1 auto; min-width: 0; }
+#flash-tip {
+  padding: 6px 8px;
+  border-left: 3px solid var(--warn);
+  background: rgba(240, 198, 116, 0.08);
+  color: var(--warn);
+}
+#flash-tip.danger { border-left-color: var(--err); background: rgba(255, 107, 107, 0.10); color: var(--err); }
+.flash-bar { height: 8px; border: 1px solid var(--line); border-radius: 4px; background: #16181c; overflow: hidden; margin: 8px 0; }
+.flash-bar-fill { height: 100%; width: 0; background: var(--accent); transition: width 0.15s linear; }
+#flash-log {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  font: 11px/1.5 Consolas, "Courier New", monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 
 /* Narrow windows: the tab list moves above the panes and scrolls sideways. */
 @media (max-width: 820px) {

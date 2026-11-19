@@ -847,6 +847,192 @@ async function build(mode) {
   }
 }
 
+/* ---------- STC ISP flashing (the ONLY entry point is the 烧录 button) ---------- */
+
+/** Fill one <select> from a list of {value,text}, keeping `selected` if still present. */
+function fillSelect(select, items, selected) {
+  if (!select) return
+  const keep = selected ?? select.value
+  select.textContent = ''
+  for (const item of items) {
+    const option = document.createElement('option')
+    option.value = String(item.value)
+    option.textContent = String(item.text ?? item.value)
+    select.appendChild(option)
+  }
+  if (keep && [...select.options].some((option) => option.value === String(keep))) select.value = String(keep)
+}
+
+function flashLog(text) {
+  const box = $('flash-log')
+  if (!box) return
+  const now = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+  box.textContent += `[${now}] ${text}\n`
+  box.scrollTop = box.scrollHeight
+}
+
+function flashProgress(percent, detail) {
+  const value = Math.max(0, Math.min(100, Number(percent) || 0))
+  $('flash-bar-fill').style.width = `${value}%`
+  $('flash-percent').textContent = `${value}%${detail ? ` · ${detail}` : ''}`
+}
+
+function flashStartUi(running) {
+  $('btn-flash-start').disabled = running
+  $('btn-flash-cancel').disabled = !running
+  $('btn-flash-start').textContent = running ? '烧录中…' : '开始烧录'
+}
+
+/** GET /api/flash/status → refresh engine chip, COM list and remembered choices. */
+async function refreshFlashStatus({ resetLog = false } = {}) {
+  const data = await api('/api/flash/status').catch((error) => ({ error: error.message }))
+  if (data.error) {
+    $('flash-engine').textContent = '引擎: 检查失败'
+    $('flash-engine').className = 'chip bad'
+    flashLog(`状态检查失败: ${data.error}`)
+    return data
+  }
+  const engine = $('flash-engine')
+  engine.textContent = data.stcgal ? `引擎: stcgal ${data.stcgal}` : '引擎: 未找到（设置 → 烧录）'
+  engine.className = `chip ${data.stcgal ? 'ok' : 'bad'}`
+  engine.title = [data.python, ...(data.tried ?? [])].filter(Boolean).join('\n')
+  fillSelect($('flash-port'), (data.ports ?? []).map((port) => ({ value: port.port, text: `${port.port} — ${port.name}` })), data.flash?.port)
+  fillSelect($('flash-baud'), (data.bauds ?? []).map((baud) => ({ value: baud, text: String(baud) })), data.flash?.baud ?? 115200)
+  fillSelect($('flash-protocol'), (data.protocols ?? []).map((protocol) => ({ value: protocol, text: protocol })), data.flash?.protocol ?? 'auto')
+  $('flash-autoreset').checked = data.flash?.autoreset === true
+  if (data.busy) {
+    flashStartUi(true)
+    $('flash-status').textContent = '烧录任务仍在进行（关闭弹层期间不会续传日志）'
+    $('flash-tip').classList.add('danger')
+  } else if (resetLog) {
+    flashStartUi(false)
+    $('flash-status').textContent = '准备就绪'
+    $('flash-tip').classList.remove('danger')
+    $('flash-log').textContent = ''
+  }
+  return data
+}
+
+async function openFlash() {
+  $('flash-modal').classList.remove('hidden')
+  if (!state.flashStatus || state.flashStatus.busy) {
+    state.flashStatus = await refreshFlashStatus({ resetLog: true })
+  }
+}
+
+async function closeFlash() {
+  $('flash-modal').classList.add('hidden')
+}
+
+/** Read one SSE response fully: status / progress / log / done frames. */
+async function consumeFlashStream(response) {
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  const handle = (payload) => {
+    if (payload.status) {
+      $('flash-status').textContent = payload.status
+      $('flash-tip').classList.toggle('danger', /等待|冷启动|断电/.test(payload.status))
+      flashLog(payload.status)
+    }
+    if (payload.progress) flashProgress(payload.progress.percent, payload.progress.detail)
+    if (payload.log) flashLog(payload.log)
+    if (payload.done) {
+      flashProgress(payload.done.success ? 100 : $('flash-percent').textContent.replace('%', ''), '')
+      if (payload.done.success) {
+        $('flash-status').textContent = '🎉 烧录成功'
+        $('flash-status').style.color = 'var(--ok)'
+      } else {
+        $('flash-status').textContent = payload.done.cancelled ? '已中止' : `烧录失败: ${payload.done.error ?? `exit ${payload.done.exitCode}`}`
+        $('flash-status').style.color = 'var(--err)'
+      }
+      flashLog(payload.done.success ? '烧录完成，芯片已运行' : JSON.stringify(payload.done))
+    }
+  }
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let index
+    while ((index = buffer.indexOf('\n\n')) >= 0) {
+      const frame = buffer.slice(0, index)
+      buffer = buffer.slice(index + 2)
+      const line = frame.split('\n').find((part) => part.startsWith('data:'))
+      if (!line) continue
+      try {
+        handle(JSON.parse(line.slice(5).trim()))
+      } catch {
+        // partial frame — ignore
+      }
+    }
+  }
+  buffer += decoder.decode()
+  for (const part of buffer.split('\n')) {
+    const line = part.trim()
+    if (!line.startsWith('data:')) continue
+    try {
+      handle(JSON.parse(line.slice(5).trim()))
+    } catch {
+      // partial frame at EOF — ignore
+    }
+  }
+}
+
+async function startFlash() {
+  const port = $('flash-port').value
+  if (!state.settings.project) {
+    flashLog('没有打开工程：先新建或打开一个 .uvproj')
+    return
+  }
+  if (!state.flashStatus?.stcgal) {
+    flashLog('没有找到 stcgal：先 pip install stcgal，或在 设置 → 烧录 里指定 Python 路径')
+    return
+  }
+  if (!port) {
+    flashLog('未选择 COM 口：点「刷新」扫描串口')
+    return
+  }
+  // Nothing writes to hardware until this exact button click reaches the POST.
+  flashStartUi(true)
+  $('flash-status').style.color = ''
+  $('flash-log').textContent = ''
+  flashLog(`开始烧录: ${port} · ${$('flash-baud').value} · ${$('flash-protocol').value}`)
+  try {
+    const response = await fetch('/api/flash/start', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
+      body: JSON.stringify({
+        project: state.settings.project,
+        port,
+        baud: Number($('flash-baud').value) || 115200,
+        protocol: $('flash-protocol').value,
+        autoreset: $('flash-autoreset').checked,
+      }),
+    })
+    if (!String(response.headers.get('content-type') ?? '').includes('text/event-stream')) {
+      const data = await response.json().catch(() => ({}))
+      flashLog(`烧录未开始: ${data.error ?? `HTTP ${response.status}`}`)
+      flashStartUi(false)
+      return
+    }
+    await consumeFlashStream(response)
+    state.flashStatus = await refreshFlashStatus({ resetLog: false })
+  } catch (error) {
+    flashLog(`烧录异常: ${error.message}`)
+  } finally {
+    flashStartUi(false)
+  }
+}
+
+async function cancelFlash() {
+  $('btn-flash-cancel').disabled = true
+  $('btn-flash-cancel').textContent = '中止中…'
+  const result = await post('/api/flash/cancel').catch((error) => ({ error: error.message }))
+  if (result.error) flashLog(`中止请求失败: ${result.error}`)
+  else flashLog(result.cancelled ? '已发出中止请求' : '当前没有正在进行的烧录')
+  $('btn-flash-cancel').textContent = '中止'
+}
+
 /* ---------- AI panel ---------- */
 
 /** What is attached to the outgoing request — as ONE short line for the transcript. */
@@ -909,7 +1095,7 @@ async function loadSkills() {
   select.textContent = ''
   const none = document.createElement('option')
   none.value = ''
-  none.textContent = '（不用技能）'
+  none.textContent = '（自动匹配）'
   select.appendChild(none)
   for (const skill of data.skills ?? []) {
     if (!skill.invocation?.userInvocable) continue
@@ -966,12 +1152,11 @@ async function send() {
     height: image.height,
     data: image.dataUrl.slice(image.dataUrl.indexOf(',') + 1),
   }))
-  const skillTag = skill ? `（技能: ${skill}）` : ''
-  // Show the user's OWN words (plus a one-line note about what was attached).
-  // Pasting the whole attached file into the transcript was the complaint:
-  // "不要将…写入对话框，直接输出用户原话即可".
+  // The skill rides INSIDE the request: the server picks/loads it and prepends it
+  // to the user turn, so neither this composer nor the transcript carries skill
+  // text or a skill marker. "静默注入" is a server-side property here.
   const attachmentNote = describeAttachments()
-  appendMessage('user', `我${skillTag}`, attachmentNote ? `${userText}\n${attachmentNote}` : userText)
+  appendMessage('user', '我', attachmentNote ? `${userText}\n${attachmentNote}` : userText)
   $('prompt').value = ''
   const button = $('btn-send')
   button.disabled = true
@@ -991,7 +1176,7 @@ async function send() {
 
     // Streaming path (OpenAI-compatible backend): render tokens as they arrive.
     if (type.includes('text/event-stream')) {
-      const box = appendMessage('ai', `AI（流式 · ${ai.model || 'openai'}${skillTag}）`, '')
+      const box = appendMessage('ai', `AI（流式 · ${ai.model || 'openai'}）`, '')
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
@@ -1019,8 +1204,14 @@ async function send() {
           const now = Date.now()
           if (now - lastRender > 120) {
             lastRender = now
+            // Only follow the tail when the reader is already there. Rebuilding the
+            // body resets every inner scroll position, and an unconditional jump to
+            // the bottom yanked anyone who had scrolled up in a long code answer
+            // back down on every frame ("the reply keeps jumping / I cannot read it").
+            const pane = $('transcript')
+            const wasAtTail = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48
             box.setBody(full)
-            $('transcript').scrollTop = $('transcript').scrollHeight
+            if (wasAtTail) pane.scrollTop = pane.scrollHeight
           }
         }
         if (payload.done) {
@@ -1672,6 +1863,7 @@ async function openSettings() {
 
   // --- 技能 ---
   const skills = settings.skills ?? {}
+  $('skills-auto-inject').checked = skills.autoInject !== false
   $('skills-shared-dsh').checked = skills.sharedDsh !== false
   $('skills-dirs').value = (skills.dirs ?? []).join('\n')
   $('skills-desc-max').value = skills.descriptionMaxLength ?? 500
@@ -1683,6 +1875,9 @@ async function openSettings() {
   const sync = settings.sync ?? {}
   $('sync-enabled').checked = sync.enabled !== false
   $('sync-interval').value = sync.intervalMs ?? 2000
+
+  // --- 烧录（STC ISP）---
+  $('flash-python').value = settings.flash?.python ?? ''
 
   // --- 预设提示词（外挂文件，可在界面里改）---
   const prompts = settings.prompts ?? {}
@@ -1756,6 +1951,7 @@ function formSettingsPatch() {
       tabSize: Number($('editor-tabsize').value) || 4,
     },
     skills: {
+      autoInject: $('skills-auto-inject').checked,
       sharedDsh: $('skills-shared-dsh').checked,
       dirs: $('skills-dirs')
         .value.split('\n')
@@ -1770,6 +1966,11 @@ function formSettingsPatch() {
     sync: {
       enabled: $('sync-enabled').checked,
       intervalMs: Number($('sync-interval').value) || 2000,
+    },
+    // Only the python path is a settings-level choice; port/baud/protocol are
+    // remembered by the server after each flash and shown in the dialog.
+    flash: {
+      python: $('flash-python').value.trim(),
     },
     prompts: {
       file: $('prompts-file').value.trim(),
@@ -2284,14 +2485,23 @@ function startMonaco() {
  * column can be folded into a narrow rail — "closed" but recoverable. All of it is
  * per-machine view state in localStorage, not settings.json.
  */
-const PANE_STORE_KEY = 'fixpoint.panes.v1'
+// v2: the reply area's meaning changed (it is a hard height inside a pane that now
+// keeps the composer intact). A v1 `reply` value made the answer area stay at the
+// old, tiny height forever, so v1's reply is deliberately NOT carried over — one
+// fresh start, the other columns are kept.
+const PANE_STORE_KEY = 'fixpoint.panes.v2'
+const PANE_STORE_KEY_V1 = 'fixpoint.panes.v1'
 const PANE_DEFAULTS = { files: null, chat: null, reply: null, problems: null, minimized: false }
 let paneState = { ...PANE_DEFAULTS }
 
 function loadPaneState() {
   try {
     const raw = localStorage.getItem(PANE_STORE_KEY)
-    return raw ? { ...PANE_DEFAULTS, ...JSON.parse(raw) } : { ...PANE_DEFAULTS }
+    if (raw) return { ...PANE_DEFAULTS, ...JSON.parse(raw) }
+    const legacy = localStorage.getItem(PANE_STORE_KEY_V1)
+    if (!legacy) return { ...PANE_DEFAULTS }
+    const old = JSON.parse(legacy)
+    return { ...PANE_DEFAULTS, ...old, reply: null }
   } catch {
     return { ...PANE_DEFAULTS }
   }
@@ -2310,6 +2520,21 @@ const PANE_PROPERTIES = {
   chat: '--chat-w',
   reply: '--reply-h',
   problems: '--problems-h',
+}
+
+/**
+ * Height the composer keeps when the reply area is dragged/resized.
+ *
+ * The composer is content-sized and pinned to the bottom (`margin-top: auto`), so
+ * this is measured from the DOM; the constant is only a floor for the first frame,
+ * when the controls block may still be 0 tall.
+ */
+const REPLY_RESERVE_PX = 210
+
+/** Measured composer height (+ the splitter), with REPLY_RESERVE_PX as a floor. */
+function composerReserve() {
+  const height = document.querySelector('.chat-controls')?.getBoundingClientRect().height ?? 0
+  return Math.max(REPLY_RESERVE_PX, Math.round(height) + 12)
 }
 
 function applyPaneSize(which) {
@@ -2377,9 +2602,10 @@ function startRowDrag(which, handle, event) {
     ? $('transcript').getBoundingClientRect().height
     : $('pane-problems').getBoundingClientRect().height
   const minimum = which === 'reply' ? 80 : 60
-  // Always leave a usable input area (reply) / editor (problems).
+  // Always leave the composer intact (reply) / a usable editor (problems). The
+  // composer's height is measured, not assumed: it is sized by its content now.
   const maximum = which === 'reply'
-    ? Math.max(minimum, chatPane.getBoundingClientRect().height - 160)
+    ? Math.max(minimum, chatPane.getBoundingClientRect().height - composerReserve())
     : Math.max(minimum, Math.min(420, window.innerHeight * 0.45))
   handle.classList.add('dragging')
   document.body.classList.add('resizing-v')
@@ -2400,32 +2626,61 @@ function startRowDrag(which, handle, event) {
   window.addEventListener('pointerup', finish)
 }
 
-/** Keep the editor usable when the window shrinks below the stored pane sizes. */
+/**
+ * Keep every pane inside the window after a resize.
+ *
+ * Two failures this exists for, both measured on a 400x866 window:
+ *   - a stored `--chat-w: 380px` put the AI pane's right edge at x=540, i.e. 140px
+ *     of it rendered past the window and looked "cut off";
+ *   - a stored `--reply-h: 700px` inside a 548px pane pushed the textarea to
+ *     y=981, entirely below the window, so the composer disappeared.
+ * Stored values are what CSS actually applied, so they are the primary source;
+ * measurements are only a fallback (at first paint the panes can still be 0 wide).
+ */
 function fitPanesToWindow() {
-  const editorMinimum = 320
-  const files = $('pane-files')?.getBoundingClientRect().width ?? 0
-  const chat = paneState.minimized ? 42 : ($('pane-chat')?.getBoundingClientRect().width ?? 0)
-  const overflow = files + chat - (window.innerWidth - editorMinimum - 20)
-  if (overflow > 0) {
-    if (!paneState.minimized && Number.isFinite(paneState.chat) && chat > 240) {
+  const width = window.innerWidth
+  const height = window.innerHeight
+  const chatPane = $('pane-chat')
+  const filesPane = $('pane-files')
+  let chat = paneState.minimized
+    ? 42
+    : Number.isFinite(paneState.chat)
+      ? paneState.chat
+      : (chatPane?.getBoundingClientRect().width ?? 0)
+  const files = Number.isFinite(paneState.files)
+    ? paneState.files
+    : (filesPane?.getBoundingClientRect().width ?? 0)
+
+  // Columns: never wider than the window (the editor flexes into what is left).
+  const room = Math.max(240, width - 20)
+  if (files + chat > room) {
+    const overflow = files + chat - room
+    if (!paneState.minimized && chat > 240) {
       paneState.chat = Math.max(240, Math.round(chat - overflow))
       applyPaneSize('chat')
-    } else if (Number.isFinite(paneState.files) && files > 150) {
-      paneState.files = Math.max(150, Math.round(files - overflow))
+      chat = paneState.chat
+    }
+    const filesTarget = Math.max(150, Math.round(files - Math.max(0, files + chat - room)))
+    if (Number.isFinite(paneState.files) && filesTarget < files) {
+      paneState.files = filesTarget
       applyPaneSize('files')
     }
   }
+
   if (Number.isFinite(paneState.problems)) {
-    const maximum = Math.max(60, Math.min(420, Math.round(window.innerHeight * 0.45)))
+    const maximum = Math.max(60, Math.min(420, Math.round(height * 0.45)))
     if (paneState.problems > maximum) {
       paneState.problems = maximum
       applyPaneSize('problems')
     }
   }
+
+  // Rows: the reply area may use whatever the measured composer leaves.
   if (Number.isFinite(paneState.reply)) {
-    const maximum = Math.max(80, $('pane-chat').getBoundingClientRect().height - 160)
+    const paneHeight = chatPane?.getBoundingClientRect().height || Math.max(320, height - 140)
+    const maximum = Math.max(80, Math.round(paneHeight - composerReserve()))
     if (paneState.reply > maximum) {
-      paneState.reply = Math.round(maximum)
+      paneState.reply = maximum
       applyPaneSize('reply')
     }
   }
@@ -2462,7 +2717,40 @@ function initPanes() {
   }
   $('btn-chat-min').onclick = () => setChatMinimized(true)
   $('btn-chat-restore').onclick = () => setChatMinimized(false)
-  window.addEventListener('resize', fitPanesToWindow)
+  window.addEventListener('resize', () => {
+    syncComposerHeight()
+    fitPanesToWindow()
+  })
+  // The composer's height changes with the window width (the button rows wrap), so
+  // keep `--composer-h` in step instead of trusting one measurement.
+  if (typeof ResizeObserver === 'function') {
+    const controls = document.querySelector('.chat-controls')
+    if (controls) new ResizeObserver(() => syncComposerHeight()).observe(controls)
+  }
+  // Stored sizes are applied before this point; a window that is now smaller than
+  // they are would otherwise keep the oversized layout until the next resize.
+  syncComposerHeight()
+  fitPanesToWindow()
+}
+
+/**
+ * Publish the composer's measured height as `--composer-h`.
+ *
+ * style.css uses it as the reply area's ceiling (`calc(100% - var(--composer-h))`).
+ * Hard-coding a number there is what left the last button row clipped: the composer
+ * is 286px tall in a wide window and taller when the button rows wrap.
+ */
+function syncComposerHeight() {
+  const controls = document.querySelector('.chat-controls')
+  if (!controls) return
+  // scrollHeight is the height the block NEEDS; rect.height is what it currently has.
+  // Taking the larger one matters: feeding a squeezed height back into the ceiling
+  // would ratchet the reply area up and squeeze the composer further each frame.
+  const height = Math.round(Math.max(controls.getBoundingClientRect().height, controls.scrollHeight))
+  if (height <= 0) return
+  const value = `${height + 6}px`
+  if (document.documentElement.style.getPropertyValue('--composer-h') === value) return
+  document.documentElement.style.setProperty('--composer-h', value)
 }
 
 /* ---------- following files changed by other programs ---------- */
@@ -3378,6 +3666,15 @@ async function boot() {
   }
   $('btn-settings-save').onclick = saveSettings
   $('btn-settings-close').onclick = () => $('settings').classList.add('hidden')
+  // STC ISP flash dialog — the single explicit entry point to hardware writes.
+  $('btn-flash').onclick = openFlash
+  $('btn-flash-close').onclick = closeFlash
+  $('btn-flash-ports').onclick = () => refreshFlashStatus({ resetLog: false })
+  $('btn-flash-start').onclick = startFlash
+  $('btn-flash-cancel').onclick = cancelFlash
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !$('flash-modal').classList.contains('hidden')) closeFlash()
+  })
   $('btn-ai-test').onclick = testAi
   $('btn-ai-clear').onclick = clearAiKey
   // Multi-model list: switch between entries, add a new one, delete the current one.

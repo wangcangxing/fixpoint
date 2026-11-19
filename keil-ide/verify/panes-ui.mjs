@@ -204,6 +204,7 @@ const heights = () =>
     controls: Math.round(document.querySelector('.chat-controls').getBoundingClientRect().height),
     problems: Math.round(document.getElementById('pane-problems').getBoundingClientRect().height),
     editor: Math.round(document.querySelector('.pane.editor').getBoundingClientRect().height),
+    chat: Math.round(document.getElementById('pane-chat').getBoundingClientRect().height),
   }))()`)
 const dragY = async (id, dy) => {
   await evaluate(`(() => {
@@ -224,8 +225,42 @@ console.log(`      before vertical: ${JSON.stringify(beforeVertical)}`)
 await dragY('split-reply', 80)
 const afterReply = await heights()
 console.log(`      after reply +80: ${JSON.stringify(afterReply)}`)
-check('reply area grows downwards', near(afterReply.transcript, beforeVertical.transcript + 80), true)
-check('input block gives up the height', afterReply.controls < beforeVertical.controls, true)
+// The reply area is capped by the pane minus the measured composer, so dragging
+// past that ceiling stops at it instead of overflowing (the old layout let the
+// transcript grow past the pane and pushed the composer below the window).
+check('reply area grows or reaches the ceiling', afterReply.transcript >= beforeVertical.transcript - 2, true)
+check(
+  'transcript + composer fit inside the pane',
+  afterReply.transcript + afterReply.controls <= afterReply.chat,
+  true,
+)
+// The composer may give up a few pixels (the skill/preset rows scroll) but the three
+// rows a user needs must stay fully inside the pane: textarea, 发送, 对比并应用.
+const composerRows = await evaluate(`(() => {
+  const pane = document.getElementById('pane-chat').getBoundingClientRect()
+  const inside = (id) => {
+    const r = document.getElementById(id).getBoundingClientRect()
+    return r.height > 8 && r.top >= pane.top - 1 && r.bottom <= pane.bottom + 1
+  }
+  return { textarea: inside('prompt'), send: inside('btn-send'), apply: inside('btn-apply') }
+})()`)
+console.log(`      composer rows: ${JSON.stringify(composerRows)}`)
+check('textarea, send and apply all stay inside the pane', composerRows.textarea && composerRows.send && composerRows.apply, true)
+
+// The last composer row ("对比并应用 AI 修改…") was the one that got clipped to half
+// its height — assert the whole button sits inside the pane.
+const applyFits = await evaluate(`(() => {
+  const btn = document.getElementById('btn-apply').getBoundingClientRect()
+  const pane = document.getElementById('pane-chat').getBoundingClientRect()
+  return { h: Math.round(btn.height), bottom: Math.round(btn.bottom), paneBottom: Math.round(pane.bottom) }
+})()`)
+console.log(`      apply button: ${JSON.stringify(applyFits)}`)
+check('apply button is fully inside the pane', applyFits.h > 8 && applyFits.bottom <= applyFits.paneBottom, true)
+
+await dragY('split-reply', -80)
+const shrunkReply = await heights()
+console.log(`      after reply -80: ${JSON.stringify(shrunkReply)}`)
+check('reply area shrinks when dragged up', shrunkReply.transcript <= afterReply.transcript - 60, true)
 
 await dragY('split-problems', -60)
 const afterProblems = await heights()
@@ -238,8 +273,18 @@ await evaluate(`location.reload(); true`)
 await until(`document.readyState === 'complete' && !!document.getElementById('pane-chat')`)
 await new Promise((resolve) => setTimeout(resolve, 900))
 const verticalReloaded = await heights()
-console.log(`      vertical after reload: ${JSON.stringify(verticalReloaded)}`)
-check('reply height survives reload', near(verticalReloaded.transcript, afterReply.transcript), true)
+// The stored reply height is restored, but never at the composer's expense: when the
+// pane got shorter (the problems pane took 60px here) the reply area is clamped to
+// `pane - 210px` instead of pushing the textarea below the window.
+const composerVisible = await evaluate(`(() => {
+  const rect = document.getElementById('prompt').getBoundingClientRect()
+  return rect.top >= 0 && rect.bottom <= window.innerHeight
+})()`)
+console.log(`      vertical after reload: ${JSON.stringify(verticalReloaded)} composerVisible=${composerVisible}`)
+const replyRestored = near(verticalReloaded.transcript, afterReply.transcript)
+const replyClamped = verticalReloaded.transcript < afterReply.transcript && composerVisible
+check('reply height survives reload', replyRestored || replyClamped, true)
+check('composer stays on screen after reload', composerVisible, true)
 check('problems height survives reload', near(verticalReloaded.problems, afterProblems.problems), true)
 
 // Double-click resets a vertical splitter to its responsive default.
